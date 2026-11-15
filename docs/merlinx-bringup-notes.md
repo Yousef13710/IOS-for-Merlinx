@@ -70,7 +70,7 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
 ```sh
 # Userland
 cd /home/devnull/IOS/hakios/userland
-GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd" OSLOG="" bash build.sh
+DRIVERS="softpipe,panfrost" GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd" OSLOG="" bash build.sh
 
 # Kernel (sync xnu/files/* into xnu-src/xnu-8796.121.2/ if modified)
 cd /home/devnull/IOS/hakios && ./xnu-build.sh -j8 -k
