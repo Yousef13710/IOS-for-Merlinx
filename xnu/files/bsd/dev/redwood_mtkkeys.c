@@ -19,7 +19,20 @@
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
+
+SYSCTL_DECL(_kern_redwood);
+static char cpufreq_info[128] = "unset";
+
+static int
+cpufreq_sysctl(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+	return SYSCTL_OUT(req, cpufreq_info, strlen(cpufreq_info) + 1);
+}
+
+SYSCTL_PROC(_kern_redwood, OID_AUTO, cpufreq, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_LOCKED | CTLFLAG_ANYBODY, NULL, 0,
+    cpufreq_sysctl, "A", "MTK CPU freq/volt");
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
@@ -137,7 +150,8 @@ pmic_write(uint32_t reg, uint32_t value)
 #define MT6358_VSRAM12_DBG0     0x1ba2
 #define MT6358_VSRAM_CON0       0x1bee  /* VSRAM_PROC11's setting */
 #define MT6358_VSRAM_CON1       0x1bf0  /* VSRAM_PROC12's */
-#define VOLT_STEP_MAX           99      /* 1.11875 V: Android's MAX_VPROC_VOLT, 1.12 V */
+#define VOLT_STEP_MAX           98      /* 1.1125 V: safe ceiling under MT6358 1.12 V MAX_VPROC_VOLT */
+#define VSRAM_STEP_MAX          112     /* 1.20 V: VSRAM stays 100 mV above Vproc */
 
 extern void redwood_keep(const char *format, ...) __printflike(1, 2);
 
@@ -173,12 +187,12 @@ cluster_raise(vm_offset_t apmixed, const char *name, uint32_t con1_at, uint32_t 
 	if (step == 0) {
 		return true;
 	}
-	/* what the boot loader leaves: 1175 MHz from a VCO of 2350 halved, 0.8 V */
-	if ((con1 >> 24 & 7) != 1 || pll_mhz(con1) < 1150 || pll_mhz(con1) > 1200 || vproc < 44 || vproc > 52) {
+	/* what the boot loader leaves: 1175 MHz from a VCO of 2350 halved (allow vproc > 52 on fallback) */
+	if ((con1 >> 24 & 7) != 1 || pll_mhz(con1) < 1150 || pll_mhz(con1) > 1200 || vproc < 44) {
 		redwood_keep("cpufreq: %s is not as the boot loader leaves it; left as it is", name);
 		return false;
 	}
-	uint32_t want_sram = step + 16 > VOLT_STEP_MAX ? VOLT_STEP_MAX : step + 16;
+	uint32_t want_sram = step + 16 > VSRAM_STEP_MAX ? VSRAM_STEP_MAX : step + 16;
 
 	if (!(tracking & 1)) {
 		uint32_t con = 0;
@@ -202,7 +216,7 @@ cluster_raise(vm_offset_t apmixed, const char *name, uint32_t con1_at, uint32_t 
 
 	wr(apmixed, con1_at, (rd(apmixed, con1_at) & ~0x3fffffu) | pll_dds(mhz * posdiv) | (1u << 31));
 	delay(20);
-	wr(apmixed, con1_at, (rd(apmixed, con1_at) & ~(7u << 24)) | posdiv_sel << 24);
+	wr(apmixed, con1_at, (rd(apmixed, con1_at) & ~(7u << 24)) | (posdiv_sel << 24) | (1u << 31));
 	delay(1);
 	con1 = rd(apmixed, con1_at);
 	(void)pmic_read(vsram_dbg, &vsram);
@@ -300,13 +314,50 @@ static void
 cpufreq_set(uint32_t how)
 {
 	vm_offset_t apmixed = ml_io_map(APMIXED_PHYS, 0x1000);
+	uint32_t a75_mhz = 2000, a55_mhz = 1700;
+	uint32_t a75_step = 96, a55_step = 76;
 
-	/* the A75s first: the window server and SpringBoard run there (core_order) */
-	if (cluster_raise(apmixed, "A75s", ARMPLL_L_CON1, MT6358_VPROC11_ELR0, MT6358_VPROC11_DBG0, MT6358_VSRAM_CON0,
-	    MT6358_VSRAM11_DBG0, MT6358_VSRAM11_TRACK, 2000, 0, how >= 2 ? 94 + 2 : 0)) {
-		(void)cluster_raise(apmixed, "A55s", ARMPLL_LL_CON1, MT6358_VPROC12_ELR0, MT6358_VPROC12_DBG0,
-		    MT6358_VSRAM_CON1, MT6358_VSRAM12_DBG0, MT6358_VSRAM12_TRACK, 1700, 1, how >= 3 ? 74 + 2 : 0);
+	if (PE_parse_boot_argn("a75_mhz", &a75_mhz, sizeof(a75_mhz))) {
+		if (a75_mhz < 1200) a75_mhz = 1200;
+		if (a75_mhz > 2150) a75_mhz = 2150;
+		if (a75_mhz > 2000) {
+			a75_step = 96 + (a75_mhz - 2000 + 33) / 34;
+			if (a75_step > VOLT_STEP_MAX) a75_step = VOLT_STEP_MAX;
+		}
 	}
+	if (PE_parse_boot_argn("a55_mhz", &a55_mhz, sizeof(a55_mhz))) {
+		if (a55_mhz < 1200) a55_mhz = 1200;
+		if (a55_mhz > 2000) a55_mhz = 2000;
+		if (a55_mhz > 1700) {
+			a55_step = 76 + (a55_mhz - 1700 + 24) / 25;
+			if (a55_step > VOLT_STEP_MAX) a55_step = VOLT_STEP_MAX;
+		}
+	}
+	/* the A75s first: fallback to stock 2000/1700 if OC fails PMIC check */
+	bool fb_a75 = false, fb_a55 = false;
+	bool a75_ok = cluster_raise(apmixed, "A75s", ARMPLL_L_CON1, MT6358_VPROC11_ELR0, MT6358_VPROC11_DBG0, MT6358_VSRAM_CON0,
+	    MT6358_VSRAM11_DBG0, MT6358_VSRAM11_TRACK, a75_mhz, 0, how >= 2 ? a75_step : 0);
+	if (!a75_ok && a75_mhz > 2000) {
+		fb_a75 = true;
+		a75_ok = cluster_raise(apmixed, "A75s", ARMPLL_L_CON1, MT6358_VPROC11_ELR0, MT6358_VPROC11_DBG0, MT6358_VSRAM_CON0,
+		    MT6358_VSRAM11_DBG0, MT6358_VSRAM11_TRACK, 2000, 0, how >= 2 ? 96 : 0);
+	}
+	if (a75_ok) {
+		if (!cluster_raise(apmixed, "A55s", ARMPLL_LL_CON1, MT6358_VPROC12_ELR0, MT6358_VPROC12_DBG0,
+		    MT6358_VSRAM_CON1, MT6358_VSRAM12_DBG0, MT6358_VSRAM12_TRACK, a55_mhz, 1, how >= 3 ? a55_step : 0) &&
+		    a55_mhz > 1700) {
+			fb_a55 = true;
+			(void)cluster_raise(apmixed, "A55s", ARMPLL_LL_CON1, MT6358_VPROC12_ELR0, MT6358_VPROC12_DBG0,
+			    MT6358_VSRAM_CON1, MT6358_VSRAM12_DBG0, MT6358_VSRAM12_TRACK, 1700, 1, how >= 3 ? 76 : 0);
+		}
+	}
+	uint32_t vp11 = 0, vp12 = 0;
+	(void)pmic_read(MT6358_VPROC11_DBG0, &vp11);
+	(void)pmic_read(MT6358_VPROC12_DBG0, &vp12);
+	uint32_t c_l = rd(apmixed, ARMPLL_L_CON1), c_ll = rd(apmixed, ARMPLL_LL_CON1);
+	snprintf(cpufreq_info, sizeof(cpufreq_info), "a75=%uMHz(c=%#x,v=%u,fb=%d) a55=%uMHz(c=%#x,v=%u,fb=%d)",
+	    pll_mhz(c_l), c_l, vp11 & 0x7f, fb_a75,
+	    pll_mhz(c_ll), c_ll, vp12 & 0x7f, fb_a55);
 }
 
 struct key {
