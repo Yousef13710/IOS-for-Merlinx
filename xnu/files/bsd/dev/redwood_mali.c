@@ -204,8 +204,8 @@ static uint32_t gl_said, gl_middle;
  */
 extern void *cpu_to_processor(int cpu);
 extern void *thread_bind(void *processor);
-extern int thread_block(void *continuation);
 extern unsigned int real_ncpus;
+extern int thread_block(void *continuation);
 
 static int
 bind_cpu(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -590,6 +590,7 @@ mali_up(void)
  */
 static LCK_GRP_DECLARE(mali_lock_group, "redwood-mali");
 static LCK_MTX_DECLARE(mali_lock, &mali_lock_group);
+static LCK_MTX_DECLARE(mali_wait_lock, &mali_lock_group);
 /*
  * Held while a job runs, and by what must not change the address space under one (an UPDATE when
  * entries are taken out); taken before mali_lock, never after. mali_lock itself is no longer held
@@ -604,7 +605,6 @@ static LCK_MTX_DECLARE(mali_job_lock, &mali_lock_group);
  * worked -- a whole core of the four lost to every frame's rendering.
  */
 static int mali_wait_event;
-static LCK_MTX_DECLARE(mali_wait_lock, &mali_lock_group);
 
 static bool
 wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
@@ -624,7 +624,7 @@ wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 		}
 		uint64_t nap;
 
-		clock_interval_to_deadline(200, NSEC_PER_USEC, &nap);
+		clock_interval_to_deadline(100, NSEC_PER_USEC, &nap);
 		lck_mtx_lock(&mali_wait_lock);
 		(void)lck_mtx_sleep_deadline(&mali_wait_lock, LCK_SLEEP_DEFAULT, (event_t)&mali_wait_event, THREAD_UNINT, nap);
 		lck_mtx_unlock(&mali_wait_lock);
