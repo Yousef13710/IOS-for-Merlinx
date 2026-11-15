@@ -12,13 +12,15 @@ Complete guide to building and installing HakiOS (XNU 8796.121.2 / iOS 16.5) on 
 - **Works:**
   - 8-core SMP (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1700 MHz), Mali-G52 @ 950 MHz (`GL=1` / Mesa Panfrost), tear-free double-buffered display (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1`).
   - Touchscreen (`redwood_nvt.c`), power & volume buttons (`buttons=2`), battery gauge (`mtkbatt=1`).
-  - Wi-Fi & Bluetooth (`connsys_step=17 connsys_bt=2`, `bluetoothd`, `BlueTool`).
-  - Rear camera (`s5kgm1sp`, `mtkcam_skel=1`).
-  - Persistent `/private/var` on `ext2` (`/dev/emmc1` -> `iosdata`, ~51.9 GiB) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (~5 min first boot; smooth UI, un-chopped icons, widgets).
+  - Bluetooth (`connsys_bt=2`, `bluetoothd`, `BlueTool` — Settings → Bluetooth works and stays on).
+  - Wi-Fi scanning/network discovery (`connsys_step=17`, `WIFID=1`).
+  - Rear camera (`s5kgm1sp`, `mtkcam_skel=1`, live preview in `Camera.app`, currently laggy/tearing).
+  - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, ~51.9 GiB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (~5 min first boot; smooth UI, un-chopped icons, widgets).
   - Optional RAM-only `/private/var` mode (`no_ext2=1` boot-arg, ~2 min boot, non-persistent).
 - **Known Limitations:**
-  - `Settings → General → About` currently crashes `Preferences`.
-  - Front camera, speakers/mic audio, cellular/baseband, and Apple online services (iCloud/App Store/activation) are not supported.
+  - **Wi-Fi:** Discovers nearby networks, but **does not connect/associate** yet.
+  - **`Settings → General → About`:** Currently crashes `Preferences`.
+  - **Not ported / unsupported:** Front camera, speakers/mic audio, cellular/baseband, `ext4` (use `ext2` for `iosdata`), and Apple online services (iCloud/App Store/activation).
 
 ---
 
@@ -32,8 +34,8 @@ Complete guide to building and installing HakiOS (XNU 8796.121.2 / iOS 16.5) on 
 ### Host (Linux x86_64)
 - `adb`, `fastboot`, `python3`, `git`, `clang`, `make`
 - Build dependencies from `./xnu-deps/setup.sh`
-- An iOS 16.5 IPSW (downloaded by yourself via `ios165/fetch.sh`) to generate the `xnusys` `packfs` system image (no Apple binaries are included in this repo)
-- Stock `merlinx` `boot.img` (used as the Android boot container for `tools/chainboot.py`) and `loader.efi`
+- An iOS 16.5 IPSW (downloaded automatically via `./ios165/fetch.sh`) to generate `userland/root.apfs` and `userland/system.apfs` (`xnusys`) — no Apple binaries are included in this repo
+- `prebuilt/loader.efi` (included in this repo) and a stock `merlinx` `boot.img` (used as the Android boot container for `tools/chainboot.py` — you can pull it from your phone in TWRP before flashing: `adb shell dd if=/dev/block/by-name/boot of=/tmp/stock_boot.img && adb pull /tmp/stock_boot.img`)
 
 ---
 
@@ -89,7 +91,7 @@ cd hakios
 python3 xnuloader/mkpayload.py \
   -o payload-step7-storage.bin \
   kernel=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837 \
-  loader=/path/to/loader.efi \
+  loader=prebuilt/loader.efi \
   ramdisk=userland/root.apfs
 
 bash mtkloader/build.sh \
@@ -97,7 +99,7 @@ bash mtkloader/build.sh \
   -D'XNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 mali=1 mali_mhz=950 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1"'
 
 python3 tools/chainboot.py \
-  /path/to/stock_boot.img \
+  stock_boot.img \
   mtkloader/mtkloader.bin \
   boot-step7-storage.img \
   payload-step7-storage.bin

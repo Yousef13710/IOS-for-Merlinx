@@ -22,7 +22,8 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
 ## 3. AKS / Keybagd (`rc.launchd.aks`)
 - **Fix for `/redwood/bin/tolog: No such file or directory`:** Built and copied `obj/tolog` unconditionally in `userland/build.sh` (previously gated on `METAL=1`). Fixed `aks_restore` and `keybagd --init` (`-25291` Identity Root error).
 
-## 4. Bluetooth (`connsys_bt=2`, `bluetoothd`, `BlueTool`, `tccd`, `keybagd`)
+## 4. Wi-Fi & Bluetooth (`connsys_step=17`, `connsys_bt=2`, `bluetoothd`, `BlueTool`, `tccd`, `keybagd`)
+- **Wi-Fi (`connsys_step=17`, `WIFID=1`):** Scans and discovers nearby Wi-Fi networks, but **does not yet connect/associate**.
 - **`bluetoothd` HCI fixes (`xnu/files/bsd/dev/redwood_connsys.c`):**
   - `OI_HCICMD_WriteDefaultErroneousDataReporting` (`0x0c5b`) failed locally with `status=628` because `Read_Local_Supported_Commands` octet 18 was `0x83` (missing bits 2 & 3). Added `packet[7 + 18] |= 0x0c;` and expanded the `0x0c5b` quirk to match any non-zero `0x0e`/`0x0f` response.
   - `0x200b` (`LE_Set_Scan_Parameters`) and `0x200c` (`LE_Set_Scan_Enable`) returned `0x0c` (`Command Disallowed`). Rewrote `04 0e 04 01 0b/0c 20 0c` to `status=0x00`.
