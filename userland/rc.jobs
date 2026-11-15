@@ -1,4 +1,5 @@
 # Commands run by the launchd job com.redwood.demo (see com.redwood.demo.plist).
+/redwood/bin/net_test name &
 /redwood/bin/hello_dyn started by launchd
 /redwood/bin/svc_test
 /redwood/bin/surf_test

@@ -28,13 +28,17 @@
 #include "../xnuloader/identity.h"
 
 /* XNU's view of memory: one contiguous range that nothing else (LK, Android, TEE, ATF, the
- * framebuffer) uses; 0xc0000000-0xfe000000 is free DRAM on this board. */
+ * framebuffer) uses; 0xc0000000-0xfe000000 (992 MB, mblock[20]) is contiguous unreserved DRAM on 3 GB merlinx. */
+#ifndef XNU_PHYS_BASE
 #define XNU_PHYS_BASE       0xc0000000ULL
-#define XNU_MEM_SIZE        0xfe000000ULL       /* up to dramc-rk1 at 0x1bffff000; room for the system image */
+#endif
+#ifndef XNU_MEM_SIZE
+#define XNU_MEM_SIZE        0x3e000000ULL       /* 992 MB (0xc0000000..0xfe000000) */
+#endif
 /* Where the system image is put, clear of the kernel, as xnuloader does it (RESIDENT_RD_OFFSET). */
 #define SYSTEM_PA           (XNU_PHYS_BASE + 0x08000000ULL)
 #define SYSTEM_PART         "xnusys"
-/* 0: all of it. Smaller is for trying the path out: a half image will not mount. */
+/* 0: all of it. Smaller is for trying the path out: packfs will not mount a half image. */
 #ifndef SYSTEM_MAX_MB
 #define SYSTEM_MAX_MB       0
 #endif
@@ -64,7 +68,7 @@
 #ifndef XNU_CORES
 #define XNU_CORES           4
 #endif
-_Static_assert(XNU_CORES >= 1 && XNU_CORES <= 7, "one core at least, and one left for the watcher");
+_Static_assert(XNU_CORES >= 1 && XNU_CORES <= 8, "1 to 8 cores");
 
 /*
  * The processors in the order the kernel is offered them: the one this code runs on first (LK
@@ -72,7 +76,7 @@ _Static_assert(XNU_CORES >= 1 && XNU_CORES <= 7, "one core at least, and one lef
  * the rest of the A55s. So "cpus=3" already gives iOS both fast cores.
  */
 static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
-#define WATCH_CORE          core_order[XNU_CORES]
+#define WATCH_CORE          (XNU_CORES < 8 ? core_order[XNU_CORES] : 0)
 /* Checkpoint for XNU to return at (osfmk/arm/arm_init.c LOADER_CHECKPOINT), 0 = none. */
 #ifndef XNU_CHECKPOINT
 #define XNU_CHECKPOINT      0
@@ -90,10 +94,6 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #ifndef GPU_PROBE
 #define GPU_PROBE           0
 #endif
-/* 1: read the camera's pins, rails and I2C controller and report, if Android asked for it (tools/cam-probe.sh); then Android. */
-#ifndef CAM_PROBE
-#define CAM_PROBE           0
-#endif
 /* 1: read the eMMC and report, then go back to Android (no XNU). */
 #ifndef MSDC_TEST
 #define MSDC_TEST           0
@@ -103,7 +103,7 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #define TIMER_PROBE         0
 #endif
 #ifndef MENU_DEFAULT_XNU
-#define MENU_DEFAULT_XNU    0
+#define MENU_DEFAULT_XNU    1
 #endif
 /*
  * 1: the kernel's text console on the screen (-v). It is a slow way to run -- scrolling reads
@@ -111,16 +111,15 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
  * it and the log comes back through the loader instead (v_display = 1 says "graphics mode").
  */
 #ifndef XNU_VERBOSE
-#define XNU_VERBOSE         0
+#define XNU_VERBOSE         1
 #endif
 /* More for the kernel's command line: cores, the clock (epoch=), whatever a run wants to try. */
-#ifndef XNU_EXTRA_ARGS
-#define XNU_EXTRA_ARGS      "cpus=1"
-#endif
-/* The serial number iOS is told (the device tree's serial-number): a placeholder, not any real device's.
- * A real build sets its own with -DXNU_SERIAL=..., which is never committed. */
+/* The serial number iOS is told (the device tree's serial-number): a placeholder, not any real device's. */
 #ifndef XNU_SERIAL
 #define XNU_SERIAL          "HAKIOS0000000000"
+#endif
+#ifndef XNU_EXTRA_ARGS
+#define XNU_EXTRA_ARGS      "cpus=4 small_cores_after=0 buttons=2 mtk_cpufreq=3 mali=1 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000"
 #endif
 /*
  * 1: the system image stays on the eMMC and the kernel reads it as it needs it (emmc_root=1,
@@ -136,9 +135,9 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #define XNU_ROOT_ARG        "rd=md0"
 #endif
 #if XNU_VERBOSE
-#define XNU_BOOT_ARGS       "debug=0x8 serial=3 " XNU_ROOT_ARG " -v " XNU_EXTRA_ARGS " loader_return_after=" XNU_RETURN_AFTER
+#define XNU_BOOT_ARGS       "debug=0x8 serial=0 " XNU_ROOT_ARG " -v " XNU_EXTRA_ARGS " loader_return_after=" XNU_RETURN_AFTER
 #else
-#define XNU_BOOT_ARGS       "debug=0x8 serial=3 " XNU_ROOT_ARG " " XNU_EXTRA_ARGS " loader_return_after=" XNU_RETURN_AFTER
+#define XNU_BOOT_ARGS       "debug=0x8 serial=0 " XNU_ROOT_ARG " " XNU_EXTRA_ARGS " loader_return_after=" XNU_RETURN_AFTER
 #endif
 
 #define CHAIN_OFFSET        0x40000u
@@ -149,6 +148,12 @@ static const uint8_t core_order[8] = { 0, 7, 6, 1, 2, 3, 4, 5 };
 #define MARKER_PA           0x80000000ULL
 #define MARK_RUNNING        0x4e52584eu /* "NXRN" */
 #define MARK_DONE           0x4e44584eu /* "NXDN" */
+
+/* Backup copy of ramoops outside LK/kedump's 0x4d010000..0x4d0effff overwrite window. */
+#define STASH_CONSOLE_PA    0x80200000ULL
+#define STASH_PMSG_PA       0x80240000ULL
+#define STASH_MAGIC_PA      0x80250000ULL
+#define STASH_MAGIC         0x53545348u /* "STSH" */
 
 #define MH_MAGIC_64         0xfeedfacfu
 #define LC_SEGMENT_64       0x19
@@ -258,6 +263,8 @@ extern void jump_to_kernel(uint64_t entry_pa, uint64_t boot_args_pa);
 extern void psci_system_reset(void);
 extern int64_t psci_cpu_on(uint64_t mpidr, uint64_t entry, uint64_t context);
 extern void watcher_entry(void);
+extern void xnu_cpu_on_trampoline(void);
+extern uint64_t xnu_cpu_on_entry_pa;
 extern void mmu_on(uint64_t l1_table);
 extern void dcache_clean_range(uint64_t va, uint64_t len);
 extern uint64_t irq_wait(uint64_t until_ticks);
@@ -393,12 +400,42 @@ static void marker_set(uint32_t v)
 	for (int i = 0; i < 3; i++) {
 		wr32(MARKER_PA + 64 * i, v);
 	}
+	dcache_clean_range(MARKER_PA, 192);
 }
 
 static uint32_t marker_get(void)
 {
 	uint32_t a = rd32(MARKER_PA), b = rd32(MARKER_PA + 64), c = rd32(MARKER_PA + 128);
 	return (a == b || a == c) ? a : (b == c ? b : 0);
+}
+
+static int keep_plog;
+
+static void plog_flush(void)
+{
+	dcache_clean_range(RAMOOPS_CONSOLE, RAMOOPS_CONSOLE_SIZE);
+	dcache_clean_range(RAMOOPS_PMSG, RAMOOPS_PMSG_SIZE);
+	dcache_clean_range(MARKER_PA, 192);
+}
+
+static void stash_save(void)
+{
+	memcpy((void *)STASH_CONSOLE_PA, (const void *)RAMOOPS_CONSOLE, RAMOOPS_CONSOLE_SIZE);
+	memcpy((void *)STASH_PMSG_PA, (const void *)RAMOOPS_PMSG, RAMOOPS_PMSG_SIZE);
+	wr32(STASH_MAGIC_PA, STASH_MAGIC);
+	dcache_clean_range(STASH_CONSOLE_PA, RAMOOPS_CONSOLE_SIZE + RAMOOPS_PMSG_SIZE + 64);
+	plog_flush();
+}
+
+static void stash_restore(void)
+{
+	if (rd32(STASH_MAGIC_PA) == STASH_MAGIC) {
+		memcpy((void *)RAMOOPS_CONSOLE, (const void *)STASH_CONSOLE_PA, RAMOOPS_CONSOLE_SIZE);
+		memcpy((void *)RAMOOPS_PMSG, (const void *)STASH_PMSG_PA, RAMOOPS_PMSG_SIZE);
+		wr32(STASH_MAGIC_PA, 0);
+		dcache_clean_range(STASH_MAGIC_PA, 64);
+		plog_flush();
+	}
 }
 
 /* ---- the display ---- */
@@ -414,7 +451,7 @@ static void display_find(void)
 
 	fb_base = LK_FB_BASE;
 	fb_pitch = LK_FB_PITCH;
-	if (addr >= LK_FB_BASE && addr < LK_FB_BASE + LK_FB_SIZE && pitch >= PANEL_W * 4 && pitch <= 4096) {
+	if (addr >= 0x40000000U && pitch >= PANEL_W * 4 && pitch <= 8192) {
 		fb_base = addr;
 		fb_pitch = pitch;
 	}
@@ -541,9 +578,9 @@ static uint64_t kva_to_pa(uint64_t va)
 /* ---- the system image, on the flash ---- */
 
 /*
- * userland/system.apfs is the root XNU mounts (md0), 2.6 GB of it: too large for a boot image,
+ * userland/system.packfs is the root XNU mounts (md0), 2.8 GB of it: too large for a boot image,
  * so it lives in its own partition (tools/gpt-carve.py made "xnusys" out of the end of userdata)
- * and is read into DRAM here. The payload's small root.apfs stays the second disk (md1).
+ * and is read into DRAM here. The payload's small root.packfs stays the second disk (md1).
  */
 static uint8_t gpt_entries[128 * 128] __attribute__((aligned(16)));
 static uint8_t sector_buf[512] __attribute__((aligned(16)));
@@ -571,7 +608,7 @@ static int gpt_find(const char *name, uint64_t *lba, uint64_t *blocks)
 		const uint8_t *e = gpt_entries + i * size;
 		int same = 1;
 
-		for (int k = 0; same && name[k] != 0; k++) {
+		for (int k = 0; same && name[k - (k ? 0 : 0)] != 0; k++) {
 			same = e[56 + 2 * k] == (uint8_t)name[k] && e[57 + 2 * k] == 0;
 		}
 		if (same && e[56 + 2 * (int)strlen(name)] == 0) {
@@ -834,7 +871,7 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_u32(&w, "#size-cells", 2);
 
 	dt_begin(&w, "chosen");
-	dt_prop_str(&w, "darwin-board", "x6826b");
+	dt_prop_str(&w, "darwin-board", "merlinx");
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", XNU_PHYS_BASE);
 	dt_prop_u64(&w, "dram-size", XNU_MEM_SIZE);
@@ -932,7 +969,7 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_end(&w);
 
 	dt_begin(&w, "arm-io");
-	dt_prop_str(&w, "device_type", "x6826b");
+	dt_prop_str(&w, "device_type", "merlinx");
 	uint64_t ranges[3] = { 0, 0x0c000000, 0x14000000 };
 	dt_prop(&w, "ranges", ranges, sizeof(ranges));
 	dt_prop_u32(&w, "#address-cells", 2);
@@ -986,7 +1023,18 @@ static void __attribute__((noreturn)) chain_android(void)
 #if TOUCH_PROBE
 	touch_hand_back();
 #endif
-	out("starting Android\n");
+	if (keep_plog) {
+		for (const char *c = "starting Android\n"; *c; c++) {
+			if (*c == '\n') {
+				uart_putc('\r');
+			}
+			uart_putc(*c);
+			fbcon_putc(*c);
+		}
+	} else {
+		out("starting Android\n");
+	}
+	plog_flush();
 
 	volatile uint32_t *dst = (volatile uint32_t *)CHAIN_STUB_PA;
 	const volatile uint32_t *src = (const volatile uint32_t *)chain_stub;
@@ -1012,7 +1060,7 @@ void loader_fault(uint64_t vec, uint64_t esr, uint64_t elr, uint64_t far)
 	out_hex(far);
 	out("\n");
 	dbg_delay_ms(5000);
-	chain_android();
+	reset_board();
 }
 
 /* ---- XNU's log into ramoops ---- */
@@ -1440,6 +1488,7 @@ void xnu_returned(uint64_t log_pa, uint64_t len, uint64_t reason, uint64_t code,
 
 	wdt_disable();
 	xnu_back = 1;
+	dcache_clean_range((uint64_t)&xnu_back, 8);
 	marker_set(MARK_DONE);
 	uint64_t screen = fbc.base;
 	fbc.base = 0; /* nothing drawn over XNU's console before it has been read */
@@ -1486,8 +1535,9 @@ void xnu_returned(uint64_t log_pa, uint64_t len, uint64_t reason, uint64_t code,
 	save_log(&sp, 1);
 	dbg_puts("=== end of XNU log ===\n");
 	save_host_keep(&xsyms);
+	stash_save();
 	show_log_tail(40);
-	dbg_delay_ms(20000);
+	dbg_delay_ms(3000);
 	reset_board();
 }
 
@@ -1593,6 +1643,7 @@ static void rescue_log(void)
 	save_log(sp, n);
 	dbg_puts("=== end of XNU log ===\n");
 	save_host_keep(&s);
+	stash_save();
 	show_log_tail(40);
 }
 
@@ -1737,12 +1788,6 @@ static void timer_probe(void)
 
 static uint64_t watcher_l1[512] __attribute__((aligned(4096)));
 static volatile uint64_t watcher_started __attribute__((aligned(64)));
-
-static void plog_flush(void)
-{
-	dcache_clean_range(RAMOOPS_CONSOLE, RAMOOPS_CONSOLE_SIZE);
-	dcache_clean_range(MARKER_PA, 192);
-}
 
 /*
  * XNU never came back (no timer, a hang): with its caches visible through our own cacheable
@@ -1913,7 +1958,7 @@ void watcher_main(void)
 	}
 	save_host_keep(&xsyms);
 	dbg_puts("=== end of watcher snapshot ===\n");
-	plog_flush();
+	stash_save();
 	psci_system_reset();
 	wdt_reset();
 }
@@ -2260,15 +2305,22 @@ static void __attribute__((noreturn)) run_xnu(void)
 		    "gic_v3_irq_cpu_init: the BPR1 write is not where it was -- EOImode stays set\n");
 	}
 
-	/* Have XNU come back here on a panic or an early exception. */
+	/* Have XNU come back here on a panic or an early exception, and start secondary cores via low DRAM. */
 	if (s.stub_slot) {
 		volatile uint64_t *slot = (volatile uint64_t *)kva_to_pa(s.stub_slot);
 		if (slot[0] == 0x545352444c554e58ULL) { /* "XNULDRST" */
+			xnu_cpu_on_entry_pa = kva_to_pa(entry_va & ~0xfffULL);
+			dcache_clean_range((uint64_t)&xnu_cpu_on_entry_pa, 64);
 			slot[1] = (uint64_t)xnu_return_stub;
 			slot[2] = XNU_CHECKPOINT;
 			slot[3] = XNU_SLIDE;
+			slot[4] = (uint64_t)xnu_cpu_on_trampoline;
 			out("return stub at ");
 			out_hex(slot[1]);
+			out(", smp trampoline at ");
+			out_hex(slot[4]);
+			out(" -> ");
+			out_hex(xnu_cpu_on_entry_pa);
 			out("\n");
 		}
 	}
@@ -2311,8 +2363,8 @@ static void __attribute__((noreturn)) run_xnu(void)
 
 	out("md0 ");
 	out_hex(sys_size ? sys_pa : rd_pa);
-	out(sys_size ? " (the system image), md1 " : XNU_ROOT_EMMC ? " is none: md1 (root.apfs), the system image on the eMMC" :
-	    " (root.apfs only)");
+	out(sys_size ? " (the system image), md1 " : XNU_ROOT_EMMC ? " is none: md1 (root.packfs), the system image on the eMMC" :
+	    " (root.packfs only)");
 	if (sys_size) {
 		out_hex(rd_pa);
 	}
@@ -2337,7 +2389,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 		out_dec(t);
 		out(" s\n");
 	} else {
-		marker_set(0);
+		marker_set(MARK_RUNNING);
 	}
 	/* The timers XNU will use: a virtual counter offset by EL2 (MediaTek's GenieZone) would
 	 * leave its deadlines forever in the future, and the kernel idle with nothing to wake it. */
@@ -2385,7 +2437,11 @@ static void __attribute__((noreturn)) run_xnu(void)
 	 * place to do it from: it would have to carry those hundred kilobytes itself, and it comes
 	 * up long after the chip has forgotten them.
 	 */
-	touch_bring_up();
+	/*
+	 * merlinx uses the Novatek NT36672A kernel driver (redwood_nvt.c, touchscreen=3) over SPI0,
+	 * not the Infinix TD4160 SPI2 touch_bring_up().
+	 */
+	/* touch_bring_up(); */
 	big_cores_clock();
 	/*
 	 * Nothing of ours is left on the panel: iOS paints only what it draws, and where it does not
@@ -3369,12 +3425,6 @@ rails_off:
 }
 #endif /* GPU_PROBE */
 
-#if CAM_PROBE
-#include "mtkcam.h"
-
-static const char cam_probe_flag[] = "DARWIN-REDWOOD:CAM-PROBE";
-#endif /* CAM_PROBE */
-
 void mtkloader_main(uint64_t dtb)
 {
 	uint32_t mark = marker_get();
@@ -3385,13 +3435,14 @@ void mtkloader_main(uint64_t dtb)
 	fbcon_init(fb_base, fb_pitch, 0, 1);
 
 	if (mark == MARK_DONE) {
-		/* XNU's log was saved when it came back; leave ramoops as it is. */
-		chain_android();
+		/* Restore XNU's log after LK/kedump ran, then continue booting XNU. */
+		marker_set(0);
+		stash_restore();
 	}
 	if (mark == MARK_RUNNING) {
+		marker_set(0);
 		rescue_log();
-		dbg_delay_ms(5000);
-		chain_android();
+		dbg_delay_ms(2000);
 	}
 
 	plog_reset();
@@ -3415,17 +3466,6 @@ void mtkloader_main(uint64_t dtb)
 	}
 	chain_android();
 #endif
-#if CAM_PROBE
-	if (pmsg_take(cam_probe_flag, sizeof(cam_probe_flag) - 1)) {
-		fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
-		fbc.x = 0;
-		fbc.y = fbc.top = 0;
-		out("== mtkloader: CAM probe ==\n");
-		cam_probe();
-		dbg_delay_ms(4000);
-	}
-	chain_android();
-#endif
 #if MSDC_TEST
 	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
 	fbc.x = 0;
@@ -3436,9 +3476,7 @@ void mtkloader_main(uint64_t dtb)
 	wdt_disable();
 	chain_android();
 #endif
-	if (!boot_choice()) {
-		chain_android();
-	}
+	(void)boot_choice();
 	fb_rect(0, 0, PANEL_W, PANEL_H, 0xff000000u);
 	fbc.x = 0;
 	fbc.y = fbc.top = 0;

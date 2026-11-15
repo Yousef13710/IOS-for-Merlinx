@@ -790,12 +790,23 @@ mount_writable(void)
 	struct stat st;
 	ssize_t n;
 
+	const char *no_ext2 = boot_arg("no_ext2");
+
 	printf("\n-- writable filesystem --\n");
-	ok = mount("ramfs", "/private/var", 0, NULL) == 0;
-	if (!ok) {
-		printf("  mount: %s\n", strerror(errno));
+	if ((!no_ext2 || strcmp(no_ext2, "1") != 0) &&
+	    stat("/dev/emmc1", &st) == 0 && mount("ext2", "/private/var", 0, (void *)"/dev/emmc1") == 0) {
+		ok = 1;
+		printf("  mounted /dev/emmc1 (ext2) on /private/var\n");
+	} else {
+		if ((!no_ext2 || strcmp(no_ext2, "1") != 0) && stat("/dev/emmc1", &st) == 0) {
+			printf("  ext2 mount failed (%s), falling back to ramfs\n", strerror(errno));
+		}
+		ok = mount("ramfs", "/private/var", 0, NULL) == 0;
+		if (!ok) {
+			printf("  mount: %s\n", strerror(errno));
+		}
 	}
-	check(ok, "mount a memory filesystem on /private/var");
+	check(ok, "mount a writable filesystem on /private/var");
 
 	/* the directories of the data volume, as listed in the template that ships with iOS (ios165/mkvarskel.py) */
 	fd = open(in_image("/etc/var.skel"), O_RDONLY, 0);
@@ -813,8 +824,12 @@ mount_writable(void)
 		if (count == 5 && f[0][0] == 'd') {
 			int mode = (int)parse_number(f[1], 8);
 
-			ok = mkdir(f[4], mode) == 0 && chmod(f[4], mode) == 0 &&
-			    chown(f[4], (int)parse_number(f[2], 10), (int)parse_number(f[3], 10)) == 0;
+			if (mkdir(f[4], mode) == 0) {
+				ok = chmod(f[4], mode) == 0 &&
+				    chown(f[4], (int)parse_number(f[2], 10), (int)parse_number(f[3], 10)) == 0;
+			} else {
+				ok = (errno == 17 /* EEXIST */);
+			}
 			if (!ok) {
 				printf("  %s: %s\n", f[4], strerror(errno));
 			}
@@ -823,7 +838,8 @@ mount_writable(void)
 			symlink(f[1], f[2]);
 		} else if (count == 6 && f[0][0] == 'f') {
 			/* a file of ours to start with (build.sh: the var/ directory): mode, owner, group, path, source in the image */
-			if (!copy_file(in_image(f[5]), f[4], (int)parse_number(f[1], 8), (int)parse_number(f[2], 10),
+			if (stat(f[4], &st) != 0 &&
+			    !copy_file(in_image(f[5]), f[4], (int)parse_number(f[1], 8), (int)parse_number(f[2], 10),
 			    (int)parse_number(f[3], 10))) {
 				printf("  %s: %s\n", f[4], strerror(errno));
 			}

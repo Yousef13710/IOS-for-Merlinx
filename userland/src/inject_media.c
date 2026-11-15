@@ -573,13 +573,15 @@ redwood_media_init(void)
 	}
 	slide = (uintptr_t)_dyld_get_shared_cache_range(&length) - CACHE_BASE;
 	torch = open("/dev/redwood-torch", O_WRONLY);
-	camera = access("/dev/redwood-camera", F_OK) == 0;
+	camera = true;
 	if (torch >= 0) {
 		flashlight_classes();
 		say("redwood: mediaserverd: the kernel has a flashlight (/dev/redwood-torch)\n");
 	}
-	if (camera) {
+	if (access("/dev/redwood-camera", F_OK) == 0) {
 		say("redwood: mediaserverd: the kernel has a camera (/dev/redwood-camera)\n");
+	} else {
+		say("redwood: mediaserverd: using synthetic camera stream (no /dev/redwood-camera)\n");
 	}
 	_dyld_register_func_for_add_image(image_added);         /* also called for every image already there */
 	{

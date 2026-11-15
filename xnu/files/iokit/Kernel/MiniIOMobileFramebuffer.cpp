@@ -33,6 +33,8 @@
 
 extern "C" {
 #include <console/video_console.h>
+#include <vm/memory_types.h>
+#include <arm/memory_types.h>
 extern struct vc_info vinfo;            /* the boot framebuffer, as the text console knows it */
 }
 
@@ -482,10 +484,11 @@ IOMobileFramebuffer::publishModes(void)
  */
 #define FLIP_OVL0               0x1400b000ULL           /* mtkloader/mtkdbg.h: OVL0_BASE */
 #define FLIP_OVL_L0_ADDR        0xf40
-#define FLIP_LK_FB_BASE         0x787b0000ULL
-#define FLIP_LK_FB_SIZE         0x1050000ULL
+#define FLIP_LK_FB_BASE         0x7cdb0000ULL
+#define FLIP_LK_FB_SIZE         0x017e8000ULL
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
+extern "C" vm_offset_t ml_io_map_unmappable(vm_offset_t phys_addr, vm_size_t size, unsigned int flags);
 static TUNABLE(uint32_t, gFlipOn, "fb_flip", 0);
 
 void
@@ -507,7 +510,7 @@ IOMobileFramebuffer::flipStart(void)
 		    "not flipping\n", scanned, (unsigned long long) vinfo.v_physaddr);
 		return;
 	}
-	second = ml_io_map_wcomb(scanned + picture, (vm_size_t) picture);
+	second = ml_io_map_unmappable(scanned + picture, (vm_size_t) picture, VM_WIMG_WCOMB);
 	if (second == 0) {
 		IOLog("MiniIOMobileFramebuffer: fb_flip: the second picture could not be mapped\n");
 		return;

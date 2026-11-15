@@ -62,10 +62,10 @@ index a4d25040f38f..aad72993d139 100644
  kern_debug.o_INCFLAGS += -I$(SRCROOT)/osfmk
  
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..4ab7ca03b301 100644
+index 44274016a4cf..bf222453c32f 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,50 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,51 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -73,6 +73,7 @@ index 44274016a4cf..4ab7ca03b301 100644
 +bsd/dev/redwood_virtio_input.c	standard
 +bsd/dev/redwood_goodix.c	standard
 +bsd/dev/redwood_tcm.c	standard
++bsd/dev/redwood_nvt.c	standard
 +bsd/dev/redwood_mtkkeys.c	standard
 +bsd/dev/redwood_mali.c	standard
 +bsd/dev/redwood_connsys.c	standard
@@ -98,7 +99,7 @@ index 44274016a4cf..4ab7ca03b301 100644
 +bsd/dev/redwood_haptic.c		standard
 +bsd/dev/redwood_torch.c		standard
 +bsd/dev/redwood_camera.c	standard
-+bsd/dev/redwood_mtkcam.c	standard
++bsd/dev/redwood_mtkcam_skel.c	standard
 +bsd/dev/redwood_mtkbatt.c	standard
 +bsd/dev/redwood_fbgrab.c	standard
 +bsd/dev/redwood_mic.c		standard
@@ -116,7 +117,7 @@ index 44274016a4cf..4ab7ca03b301 100644
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +199,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +200,15 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -128,10 +129,11 @@ index 44274016a4cf..4ab7ca03b301 100644
 +bsd/miscfs/apfs/apfs_vfsops.c		optional apfs
 +bsd/miscfs/apfs/apfs_vnops.c		optional apfs
 +bsd/miscfs/ramfs/ramfs.c			optional ramfs
++bsd/miscfs/ext2/ext2.c				standard
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +413,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +415,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -139,7 +141,7 @@ index 44274016a4cf..4ab7ca03b301 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +436,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +438,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard
@@ -1251,15 +1253,16 @@ index cbaa0b221894..78315a2d54cf 100644
  	int eofflag;
  	uint64_t options;
 diff --git a/bsd/vfs/vfs_conf.c b/bsd/vfs/vfs_conf.c
-index bae70cda3a96..031613b10643 100644
+index bae70cda3a96..b2e9b3c17919 100644
 --- a/bsd/vfs/vfs_conf.c
 +++ b/bsd/vfs/vfs_conf.c
-@@ -103,6 +103,15 @@ extern  struct vfsops mockfs_vfsops;
+@@ -103,6 +103,16 @@ extern  struct vfsops mockfs_vfsops;
  extern  int mockfs_mountroot(mount_t, vnode_t, vfs_context_t);
  #endif /* MOCKFS */
  
 +#if RAMFS
 +extern  struct vfsops ramfs_vfsops;
++extern  struct vfsops ext2_vfsops;
 +#endif /* RAMFS */
 +
 +#if APFS
@@ -1270,7 +1273,7 @@ index bae70cda3a96..031613b10643 100644
  enum fs_type_num {
  	FT_NFS = 2,
  	FT_DEVFS = 19,
-@@ -110,7 +119,9 @@ enum fs_type_num {
+@@ -110,7 +120,9 @@ enum fs_type_num {
  	FT_ROUTEFS = 21,
  	FT_NULLFS = 22,
  	FT_BINDFS = 23,
@@ -1281,7 +1284,7 @@ index bae70cda3a96..031613b10643 100644
  };
  
  int fstypenumstart = FT_BINDFS + 1;
-@@ -194,6 +205,54 @@ static struct vfstable vfstbllist[] = {
+@@ -194,6 +206,71 @@ static struct vfstable vfstbllist[] = {
  	},
  #endif /* BINDFS */
  
@@ -1303,6 +1306,23 @@ index bae70cda3a96..031613b10643 100644
 +		.vfc_sysctl = NULL
 +	},
 +#endif /* RAMFS */
++
++	/* Read-write ext2 filesystem on eMMC */
++	{
++		.vfc_vfsops = &ext2_vfsops,
++		.vfc_name = "ext2",
++		.vfc_typenum = 30,
++		.vfc_refcount = 0,
++		.vfc_flags = MNT_LOCAL,
++		.vfc_mountroot = NULL,
++		.vfc_next = NULL,
++		.vfc_reserved1 = 0,
++		.vfc_reserved2 = 0,
++		.vfc_vfsflags = VFC_VFSGENERICARGS | VFC_VFS64BITREADY,
++		.vfc_descptr = NULL,
++		.vfc_descsize = 0,
++		.vfc_sysctl = NULL
++	},
 +
 +#if APFS
 +	/*
@@ -1336,13 +1356,14 @@ index bae70cda3a96..031613b10643 100644
  #if MOCKFS
  	/* If we are configured for it, mockfs should always be the last standard entry (and thus the last FS we attempt mountroot with) */
  	{
-@@ -298,6 +357,15 @@ extern const struct vnodeopv_desc devfs_fdesc_vnodeop_opv_desc;
+@@ -298,6 +375,16 @@ extern const struct vnodeopv_desc devfs_fdesc_vnodeop_opv_desc;
  extern const struct vnodeopv_desc mockfs_vnodeop_opv_desc;
  #endif /* MOCKFS */
  
 +
 +#if RAMFS
 +extern const struct vnodeopv_desc ramfs_vnodeop_opv_desc;
++extern const struct vnodeopv_desc ext2_vnodeop_opv_desc;
 +#endif /* RAMFS */
 +
 +#if APFS
@@ -1352,12 +1373,13 @@ index bae70cda3a96..031613b10643 100644
  extern const struct vnodeopv_desc nullfs_vnodeop_opv_desc;
  extern const struct vnodeopv_desc bindfs_vnodeop_opv_desc;
  
-@@ -327,5 +395,11 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
+@@ -327,5 +414,12 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
  #if MOCKFS
  	&mockfs_vnodeop_opv_desc,
  #endif /* MOCKFS */
 +#if RAMFS
 +	&ramfs_vnodeop_opv_desc,
++	&ext2_vnodeop_opv_desc,
 +#endif /* RAMFS */
 +#if APFS
 +	&apfs_vnodeop_opv_desc,
@@ -2050,7 +2072,7 @@ index 0316792a3f42..c339b8b7911b 100644
  # Assume LTO scaling by default, unless it is being explicitly passed on the command-line
  LARGE_BUILD_FOOTPRINT := $(if $(BUILD_LTO),$(BUILD_LTO),1)
 diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
-index e26a1d70f470..f91095c98d26 100644
+index e26a1d70f470..b75af17d522c 100644
 --- a/osfmk/arm/arm_init.c
 +++ b/osfmk/arm/arm_init.c
 @@ -73,6 +73,9 @@
@@ -2111,7 +2133,33 @@ index e26a1d70f470..f91095c98d26 100644
  
  	chosen = NULL; // Force a re-lookup later on since VM addresses are not final at this point
  	dt_entry_size = 0;
-@@ -422,10 +436,13 @@ arm_init(
+@@ -394,21 +408,11 @@ arm_init(
+ 	{
+ 		/*
+ 		 * Select the advertised kernel page size.
++		 * Force 16KB VM pages on arm64 even when XNU's DRAM window is <= 1GB
++		 * (e.g. 992MB on 3GB merlinx), because iOS 16.5 userland and dyld shared cache
++		 * code directories require 16KB page size.
+ 		 */
+-		if (args->memSize > 1ULL * 1024 * 1024 * 1024) {
+-			/*
+-			 * arm64 device with > 1GB of RAM:
+-			 * kernel uses 16KB pages.
+-			 */
+-			PAGE_SHIFT_CONST = PAGE_MAX_SHIFT;
+-		} else {
+-			/*
+-			 * arm64 device with <= 1GB of RAM:
+-			 * kernel uses hardware page size
+-			 * (4KB for H6/H7, 16KB for H8+).
+-			 */
+-			PAGE_SHIFT_CONST = ARM_PGSHIFT;
+-		}
++		PAGE_SHIFT_CONST = PAGE_MAX_SHIFT;
+ 
+ 		/* 32-bit apps always see 16KB page size */
+ 		page_shift_user32 = PAGE_MAX_SHIFT;
+@@ -422,10 +426,13 @@ arm_init(
  	}
  #endif
  
@@ -2125,7 +2173,7 @@ index e26a1d70f470..f91095c98d26 100644
  	assert(master_cpu >= 0 && master_cpu <= ml_get_max_cpu_number());
  
  	BootCpuData.cpu_number = (unsigned short)master_cpu;
-@@ -439,11 +456,14 @@ arm_init(
+@@ -439,11 +446,14 @@ arm_init(
  	CpuDataEntries[master_cpu].cpu_data_paddr = (void *)((uintptr_t)(args->physBase)
  	    + ((uintptr_t)&BootCpuData
  	    - (uintptr_t)(args->virtBase)));
@@ -2140,7 +2188,7 @@ index e26a1d70f470..f91095c98d26 100644
  
  	/*
  	 * Preemption is enabled for this thread so that it can lock mutexes without
-@@ -452,12 +472,16 @@ arm_init(
+@@ -452,12 +462,16 @@ arm_init(
  	 * preemption level is not really meaningful for the bootstrap thread.
  	 */
  	thread->machine.preemption_count = 0;
@@ -2157,7 +2205,7 @@ index e26a1d70f470..f91095c98d26 100644
  
  	/*
  	 * Initialize the timer callout world
-@@ -465,6 +489,7 @@ arm_init(
+@@ -465,6 +479,7 @@ arm_init(
  	timer_call_init();
  
  	cpu_init();
@@ -2165,7 +2213,7 @@ index e26a1d70f470..f91095c98d26 100644
  
  	processor_bootstrap();
  
-@@ -514,6 +539,7 @@ arm_init(
+@@ -514,6 +529,7 @@ arm_init(
  #endif  /* __ARM_PAN_AVAILABLE__ */
  
  	arm_vm_init(xmaxmem, args);
@@ -2173,7 +2221,7 @@ index e26a1d70f470..f91095c98d26 100644
  
  	if (debug_boot_arg) {
  		patch_low_glo();
-@@ -527,7 +553,9 @@ arm_init(
+@@ -527,7 +543,9 @@ arm_init(
  
  	/* Setup debugging output. */
  	const unsigned int serial_exists = serial_init();
@@ -2183,7 +2231,7 @@ index e26a1d70f470..f91095c98d26 100644
  	kprintf("kprintf initialized\n");
  
  	serialmode = 0;
-@@ -569,6 +597,7 @@ arm_init(
+@@ -569,6 +587,7 @@ arm_init(
  		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
  	}
  	PE_create_console();
@@ -2191,7 +2239,7 @@ index e26a1d70f470..f91095c98d26 100644
  
  	/* setup console output */
  	PE_init_printf(FALSE);
-@@ -647,6 +676,7 @@ arm_init(
+@@ -647,6 +666,7 @@ arm_init(
  	 * against string vulnerabilities
  	 */
  	__stack_chk_guard &= ~(0xFFULL << 8);
@@ -2199,7 +2247,7 @@ index e26a1d70f470..f91095c98d26 100644
  	machine_startup(args);
  }
  
-@@ -673,6 +703,9 @@ arm_init_cpu(
+@@ -673,6 +693,9 @@ arm_init_cpu(
  
  
  	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
@@ -2555,7 +2603,7 @@ index e76e7e70ab9c..4f540f8caf43 100644
  
  void
 diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
-index e5336e5a1cce..a54e35035cde 100644
+index e5336e5a1cce..1b71f64c80a2 100644
 --- a/osfmk/arm64/start.s
 +++ b/osfmk/arm64/start.s
 @@ -126,6 +126,27 @@ LEXT(LowResetVectorBase)
@@ -2605,7 +2653,7 @@ index e5336e5a1cce..a54e35035cde 100644
  	and		x0, x15, #0xFFFF					// CPU number in Affinity0, cluster ID in Affinity1
  #else
  	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
-@@ -233,40 +257,175 @@ LEXT(_start)
+@@ -233,40 +257,176 @@ LEXT(_start)
  	.global	EXT(LowExceptionVectorBase)
  LEXT(LowExceptionVectorBase)
  	/* EL1 SP 0 */
@@ -2707,6 +2755,7 @@ index e5336e5a1cce..a54e35035cde 100644
 +	.quad	0						// PA of the loader's return stub
 +	.quad	0						// checkpoint number to stop at (0 = none)
 +	.quad	0						// (physical - virtual) offset of the static kernel image
++	.quad	0						// PA of low-DRAM PSCI CPU_ON trampoline (optional)
 +
 +#if defined(GENERIC_PSCI_SMP)
 +/*
@@ -2797,7 +2846,7 @@ index e5336e5a1cce..a54e35035cde 100644
  	.align 12, 0
  
  #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
-@@ -452,22 +611,51 @@ start_cpu:
+@@ -452,22 +612,51 @@ start_cpu:
   * Cold boot init routine.  Called from __start
   *   x0 - Boot args
   */
@@ -2852,7 +2901,7 @@ index e5336e5a1cce..a54e35035cde 100644
  
  	// Get the kernel memory parameters from the boot args
  	ldr		x22, [x20, BA_VIRT_BASE]			// Get the kernel virt base
-@@ -612,6 +800,7 @@ Lkernelcache_base_found:
+@@ -612,6 +801,7 @@ Lkernelcache_base_found:
  	/* Ensure TTEs are visible */
  	dsb		ish
  
@@ -2860,7 +2909,7 @@ index e5336e5a1cce..a54e35035cde 100644
  
  	b		common_start
  
-@@ -686,7 +875,10 @@ common_start:
+@@ -686,7 +876,10 @@ common_start:
  	dsb		ish
  
  
@@ -2872,7 +2921,7 @@ index e5336e5a1cce..a54e35035cde 100644
  	// Setup timer interrupt routing; must be done before MMU is enabled
  	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
  	and		x15, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
-@@ -740,10 +932,17 @@ common_start:
+@@ -740,10 +933,17 @@ common_start:
  	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
  #endif /* HAS_APPLE_PAC */
  
@@ -3287,6 +3336,44 @@ index bec97fbf7243..203e1f48783f 100644
  #endif
  
  #if CONFIG_DTRACE
+diff --git a/osfmk/kern/task_policy.c b/osfmk/kern/task_policy.c
+index 461c0d9560d4..bd0629492d8b 100644
+--- a/osfmk/kern/task_policy.c
++++ b/osfmk/kern/task_policy.c
+@@ -2853,19 +2853,24 @@ task_set_cpuusage(task_t task, uint8_t percentage, uint64_t interval, uint64_t d
+ 			}
+ 
+ 			if (warn) {
+-				int       pid = 0;
+-				const char *procname = "unknown";
++				static boolean_t cpumon_warned = FALSE;
++
++				if (!cpumon_warned) {
++					int       pid = 0;
++					const char *procname = "unknown";
+ 
+ #ifdef MACH_BSD
+-				pid = proc_selfpid();
+-				void *cur_bsd_info = get_bsdtask_info(current_task());
+-				if (cur_bsd_info != NULL) {
+-					procname = proc_name_address(cur_bsd_info);
+-				}
++					pid = proc_selfpid();
++					void *cur_bsd_info = get_bsdtask_info(current_task());
++					if (cur_bsd_info != NULL) {
++						procname = proc_name_address(cur_bsd_info);
++					}
+ #endif
+ 
+-				printf("process %s[%d] denied attempt to escape CPU monitor"
+-				    " (missing required entitlement).\n", procname, pid);
++					cpumon_warned = TRUE;
++					printf("process %s[%d] denied attempt to escape CPU monitor"
++					    " (missing required entitlement).\n", procname, pid);
++				}
+ 			}
+ 
+ 			/* configure the limit values */
 diff --git a/osfmk/kern/thread.c b/osfmk/kern/thread.c
 index 384ef23fe0e1..d5ab6db0edbc 100644
 --- a/osfmk/kern/thread.c

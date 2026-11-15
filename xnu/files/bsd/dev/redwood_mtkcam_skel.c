@@ -26,10 +26,19 @@
 #include <sys/redwood_camera.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
+#include <vm/vm_kern.h>
+#include <vm/pmap.h>
 
 extern void redwood_host_keep_add(const char *format, ...) __printflike(1, 2);
 extern kern_return_t kernel_thread_start_priority(thread_continue_t continuation, void *parameter, integer_t priority, thread_t *new_thread);
 extern kern_return_t thread_terminate(thread_t thread);
+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern void delay(int usec);
+extern void redwood_pwrap_lock(void);
+extern void redwood_pwrap_unlock(void);
+extern uint64_t kvtophys(vm_offset_t va);
+
+#include "redwood_mtkcam_gm1sp.h"
 
 #define say(...) redwood_host_keep_add("mtkcam-skel: " __VA_ARGS__)
 
@@ -89,9 +98,485 @@ struct mtkcam_platform {
  * Nothing is assumed. For the Infinix Hot 20 the values are in redwood_mtkcam.c (CAM_PITCH, CAM_LINES, CAM_BAYER, CAM_BLACK10, CAM_GAIN_UNITY, ...)
  * and each one says there how it was found.
  */
+static int m_power_on(void);
+static void m_power_off(void);
+static int m_sensor_start(void);
+static void m_sensor_stop(void);
+static int m_rx_start(void);
+static void m_rx_stop(void);
+static int m_frame_done(struct mtkcam_frame_meta *meta);
+static void m_read_lines(unsigned buf, uint32_t first, uint32_t lines, uint8_t *dst);
+static void m_frame_release(unsigned buf);
+static int m_set_exposure(uint32_t lines, uint32_t gain, uint32_t frame_lines);
+
 static const struct mtkcam_platform mtkcam_platform = {
-	.name = NULL,
+	.name = "mt6768 / merlinx / s5k-gm1sp",
+	.geometry = {
+		.width = 4000,
+		.height = 3000,
+		.bayer = 1,             /* GRBG (output_format=2 Gr in /proc/driver/camera_info) */
+		.black = 64,
+		.line_ns = 10467,       /* 5024 / 480 MHz */
+		.gain_unity = 0x100,
+		.gain_max = 0x1000,
+		.frame_lines_min = 0x0c7a,
+		.frame_lines_max = 0xfff0,
+		.margin = 8,
+		.nbuf = 3,
+	},
+	.power_on = m_power_on,
+	.power_off = m_power_off,
+	.sensor_start = m_sensor_start,
+	.sensor_stop = m_sensor_stop,
+	.rx_start = m_rx_start,
+	.rx_stop = m_rx_stop,
+	.frame_done = m_frame_done,
+	.read_lines = m_read_lines,
+	.frame_release = m_frame_release,
+	.set_exposure = m_set_exposure,
 };
+
+/* ---- merlinx (Redmi Note 9, MT6768, S5KGM1SP on I2C2) hardware ---- */
+#define M_NBUF          3u
+#define M_W             4000u
+#define M_H             3000u
+#define M_BUF_BYTES     (M_W * M_H)     /* 12,000,000 bytes (8-bit top-8 DMA) */
+#define M_HDR_BYTES     4096u
+#define M_SENSOR_ADDR7  0x10u
+
+#define M_PWRAP_OFF     0xd000ULL
+#define M_WACS2_CMD     0xc20
+#define M_WACS2_RDATA   0xc24
+#define M_WACS2_VLDCLR  0xc28
+#define M_GPIO_OFF      0x5000ULL
+#define M_VCAMIO_EN     0x1cb0
+#define M_PIN_AVDD      178
+#define M_PIN_DVDD      179
+#define M_PIN_RST       102
+#define M_PIN_MCLK      100
+#define M_PIN_SCL       103
+#define M_PIN_SDA       104
+
+static struct {
+	uint64_t pa;
+	vm_size_t sz;
+	vm_offset_t va;
+} m_win[] = {
+	{ 0x10000000ULL, 0x10000, 0 },  /* topckgen, infracfg, GPIO, SPM, APMIXED, pwrap */
+	{ 0x11c10000ULL, 0x6000, 0 },   /* MIPI RX */
+	{ 0x14000000ULL, 0x3000, 0 },   /* mmsys, smi_common */
+	{ 0x1a000000ULL, 0x53000, 0 },  /* camsys, smi_larb3, SENINF, CAMSV */
+};
+
+static vm_offset_t m_img_va[M_NBUF], m_hdr_va[M_NBUF];
+static uint32_t m_img_pa[M_NBUF], m_hdr_pa[M_NBUF];
+static bool m_bufs_ok, m_domain_by_us, m_have_io;
+static uint16_t m_vcamio_orig;
+static uint32_t m_cfg1_orig, m_cfg6_orig, m_cfg7_orig, m_mm_cg_orig, m_apmix_orig;
+static uint32_t m_scl_mode, m_sda_mode;
+static uint32_t m_cur_exp = 0x0400, m_cur_gain = 0x0100, m_cur_fll = 0x0c7a;
+static unsigned m_poll_idx;
+
+static volatile uint32_t *m_reg(uint64_t pa) {
+	for (unsigned i = 0; i < 4; i++) {
+		if (pa >= m_win[i].pa && pa + 4 <= m_win[i].pa + m_win[i].sz && m_win[i].va) {
+			return (volatile uint32_t *)(m_win[i].va + (pa - m_win[i].pa));
+		}
+	}
+	return NULL;
+}
+static uint32_t pa_rd32(uint64_t pa) {
+	volatile uint32_t *p = m_reg(pa);
+	return p ? *p : 0;
+}
+static void pa_wr32(uint64_t pa, uint32_t v) {
+	volatile uint32_t *p = m_reg(pa);
+	if (p) *p = v;
+}
+static inline uint32_t m_rd32(vm_offset_t base, uint32_t off) { return *(volatile uint32_t *)(base + off); }
+static inline void m_wr32(vm_offset_t base, uint32_t off, uint32_t v) { *(volatile uint32_t *)(base + off) = v; }
+static inline void m_dsb(void) { __asm__ volatile("dsb sy" ::: "memory"); }
+
+static void m_inval(volatile void *base, uint64_t n) {
+	for (uint64_t a = (uint64_t)base & ~63ULL; a < (uint64_t)base + n; a += 64) {
+		__asm__ volatile("dc civac, %0" : : "r"(a) : "memory");
+	}
+	m_dsb();
+}
+
+static bool m_poll(uint64_t pa, uint32_t mask, uint32_t want, uint32_t ms) {
+	for (uint32_t i = 0; i < ms * 10; i++) {
+		if ((pa_rd32(pa) & mask) == want) return true;
+		delay(100);
+	}
+	return false;
+}
+
+static bool m_pwrap_wait(vm_offset_t pw, uint32_t st) {
+	for (uint32_t i = 0; i < 200000; i++) {
+		if (((m_rd32(pw, M_WACS2_RDATA) >> 16) & 7u) == st) return true;
+	}
+	return false;
+}
+static bool m_pwrap_rd(vm_offset_t pw, uint32_t reg, uint16_t *val) {
+	bool ok = false;
+	redwood_pwrap_lock();
+	if (m_pwrap_wait(pw, 0)) {
+		m_wr32(pw, M_WACS2_CMD, (reg >> 1) << 16);
+		if (m_pwrap_wait(pw, 6)) { *val = (uint16_t)m_rd32(pw, M_WACS2_RDATA); m_wr32(pw, M_WACS2_VLDCLR, 1); ok = true; }
+	}
+	redwood_pwrap_unlock();
+	return ok;
+}
+static bool m_pwrap_wr(vm_offset_t pw, uint32_t reg, uint16_t val) {
+	bool ok = false;
+	redwood_pwrap_lock();
+	if (m_pwrap_wait(pw, 0)) {
+		m_wr32(pw, M_WACS2_CMD, (1u << 31) | ((reg >> 1) << 16) | val);
+		ok = m_pwrap_wait(pw, 0);
+	}
+	redwood_pwrap_unlock();
+	return ok;
+}
+
+static void m_pin_mode(vm_offset_t gp, uint32_t pin, uint32_t mode) {
+	uint32_t off = 0x300 + 0x10 * (pin / 8), sh = 4 * (pin % 8);
+	m_wr32(gp, off, (m_rd32(gp, off) & ~(0xfu << sh)) | (mode << sh));
+}
+static void m_pin_out(vm_offset_t gp, uint32_t pin, int level) {
+	uint32_t bank = pin / 32, bit = 1u << (pin % 32);
+	m_wr32(gp, (level ? 0x104 : 0x108) + 0x10 * bank, bit);
+	m_wr32(gp, 0x004 + 0x10 * bank, bit);
+}
+static int m_pin_in(vm_offset_t gp, uint32_t pin) {
+	return (m_rd32(gp, 0x200 + 0x10 * (pin / 32)) >> (pin % 32)) & 1u;
+}
+static void m_bb_line(vm_offset_t gp, uint32_t pin, int high) {
+	uint32_t bank = pin / 32, bit = 1u << (pin % 32);
+	if (high) m_wr32(gp, 0x008 + 0x10 * bank, bit);
+	else { m_wr32(gp, 0x108 + 0x10 * bank, bit); m_wr32(gp, 0x004 + 0x10 * bank, bit); }
+}
+static void m_bb_scl(vm_offset_t gp, int high) {
+	m_bb_line(gp, M_PIN_SCL, high);
+	if (high) for (int i = 0; i < 200 && !m_pin_in(gp, M_PIN_SCL); i++) delay(5);
+	delay(4);
+}
+static void m_bb_sda(vm_offset_t gp, int high) { m_bb_line(gp, M_PIN_SDA, high); delay(4); }
+static void m_bb_start(vm_offset_t gp) { m_bb_sda(gp, 1); m_bb_scl(gp, 1); m_bb_sda(gp, 0); m_bb_scl(gp, 0); }
+static void m_bb_stop(vm_offset_t gp)  { m_bb_sda(gp, 0); m_bb_scl(gp, 1); m_bb_sda(gp, 1); }
+static int m_bb_wr(vm_offset_t gp, uint8_t b) {
+	for (int i = 7; i >= 0; i--) { m_bb_sda(gp, (b >> i) & 1); m_bb_scl(gp, 1); m_bb_scl(gp, 0); }
+	m_bb_sda(gp, 1); m_bb_scl(gp, 1);
+	int ack = !m_pin_in(gp, M_PIN_SDA);
+	m_bb_scl(gp, 0);
+	return ack;
+}
+static uint8_t m_bb_rd(vm_offset_t gp, int ack) {
+	uint8_t b = 0;
+	m_bb_sda(gp, 1);
+	for (int i = 0; i < 8; i++) { m_bb_scl(gp, 1); b = (uint8_t)((b << 1) | (m_pin_in(gp, M_PIN_SDA) ? 1 : 0)); m_bb_scl(gp, 0); }
+	m_bb_sda(gp, !ack); m_bb_scl(gp, 1); m_bb_scl(gp, 0); m_bb_sda(gp, 1);
+	return b;
+}
+static int m_bb_read8(vm_offset_t gp, uint32_t addr7, uint16_t reg, uint8_t *val) {
+	int missed = 0;
+	m_bb_start(gp);
+	missed |= !m_bb_wr(gp, (uint8_t)(addr7 << 1)) << 0;
+	missed |= !m_bb_wr(gp, (uint8_t)(reg >> 8)) << 1;
+	missed |= !m_bb_wr(gp, (uint8_t)(reg & 0xffu)) << 2;
+	m_bb_start(gp);
+	missed |= !m_bb_wr(gp, (uint8_t)((addr7 << 1) | 1)) << 3;
+	*val = m_bb_rd(gp, 0);
+	m_bb_stop(gp);
+	return missed;
+}
+static bool m_bb_write16(vm_offset_t gp, uint32_t addr7, uint16_t reg, uint16_t val) {
+	int ok;
+	m_bb_start(gp);
+	ok = m_bb_wr(gp, (uint8_t)(addr7 << 1));
+	ok &= m_bb_wr(gp, (uint8_t)(reg >> 8));
+	ok &= m_bb_wr(gp, (uint8_t)(reg & 0xffu));
+	ok &= m_bb_wr(gp, (uint8_t)(val >> 8));
+	ok &= m_bb_wr(gp, (uint8_t)(val & 0xffu));
+	m_bb_stop(gp);
+	return ok != 0;
+}
+
+static bool m_alloc_bufs(void) {
+	if (m_bufs_ok) return true;
+	for (unsigned k = 0; k < M_NBUF; k++) {
+		if (kmem_alloc_contig(kernel_map, &m_img_va[k], M_BUF_BYTES, PAGE_MASK,
+		    (ppnum_t)(0x100000000ULL >> PAGE_SHIFT), 0,
+		    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+			say("kmem_alloc_contig img[%u] failed", k);
+			return false;
+		}
+		if (kmem_alloc_contig(kernel_map, &m_hdr_va[k], M_HDR_BYTES, PAGE_MASK,
+		    (ppnum_t)(0x100000000ULL >> PAGE_SHIFT), 0,
+		    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+			say("kmem_alloc_contig hdr[%u] failed", k);
+			return false;
+		}
+		m_img_pa[k] = (uint32_t)kvtophys(m_img_va[k]);
+		m_hdr_pa[k] = (uint32_t)kvtophys(m_hdr_va[k]);
+		say("buf[%u] img_pa=%#x hdr_pa=%#x", k, m_img_pa[k], m_hdr_pa[k]);
+	}
+	m_bufs_ok = true;
+	return true;
+}
+
+static int m_power_on(void) {
+	for (unsigned i = 0; i < 4; i++) {
+		if (!m_win[i].va) {
+			m_win[i].va = ml_io_map(m_win[i].pa, m_win[i].sz);
+			if (!m_win[i].va) { say("ml_io_map(%#llx) failed", m_win[i].pa); return ENOMEM; }
+		}
+	}
+	if (!m_alloc_bufs()) return ENOMEM;
+
+	vm_offset_t top = m_win[0].va, pw = top + M_PWRAP_OFF, gp = top + M_GPIO_OFF;
+
+	/* CAM power domain */
+	m_domain_by_us = false;
+	if (!((pa_rd32(0x10006180ULL) | pa_rd32(0x10006184ULL)) & (1u << 7))) {
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) | (1u << 2));
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) | (1u << 3));
+		if (!m_poll(0x10006180ULL, 1u << 7, 1u << 7, 20) || !m_poll(0x10006184ULL, 1u << 7, 1u << 7, 20)) {
+			say("CAM domain did not power on");
+			return EIO;
+		}
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) & ~(1u << 4));
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) & ~(1u << 1));
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) | (1u << 0));
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) & ~(1u << 8));
+		(void)m_poll(0x10006344ULL, 1u << 12, 0, 20);
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) & ~(1u << 9));
+		(void)m_poll(0x10006344ULL, 1u << 13, 0, 20);
+		pa_wr32(0x100012a4ULL, 0x00100000u);
+		pa_wr32(0x140023c8ULL, 8);
+		pa_wr32(0x100012acULL, 0x00280000u);
+		m_dsb();
+		m_domain_by_us = true;
+	}
+
+	m_cfg1_orig = m_rd32(top, 0x50);
+	m_cfg6_orig = m_rd32(top, 0xa0);
+	m_cfg7_orig = m_rd32(top, 0xb0);
+	m_mm_cg_orig = pa_rd32(0x14000100ULL);
+	m_wr32(top, 0xb8, 0x80008000u);
+	m_wr32(top, 0xa8, 0x00800000u);
+	pa_wr32(0x14000108ULL, 0x02000000u);
+	pa_wr32(0x1a000008ULL, 0x00001fc3u);
+	m_apmix_orig = pa_rd32(0x1000c014ULL);
+	pa_wr32(0x1000c014ULL, m_apmix_orig | 0x00000840u);
+	for (int n = 0; n < 6; n++) {
+		uint64_t a = 0x11c10080ULL + 0x1000ULL * (uint64_t)n;
+		pa_wr32(a, pa_rd32(a) | 2u);
+	}
+	m_dsb();
+
+	/* Sensor rails & pins */
+	m_pin_mode(gp, M_PIN_RST, 0);
+	m_pin_out(gp, M_PIN_RST, 0);
+	m_pin_mode(gp, M_PIN_AVDD, 0);
+	m_pin_out(gp, M_PIN_AVDD, 1);
+	delay(1000);
+	m_have_io = false;
+	if (m_pwrap_rd(pw, M_VCAMIO_EN, &m_vcamio_orig)) {
+		m_pwrap_wr(pw, M_VCAMIO_EN, m_vcamio_orig | 1u);
+		m_have_io = true;
+	}
+	delay(1000);
+	m_pin_mode(gp, M_PIN_DVDD, 0);
+	m_pin_out(gp, M_PIN_DVDD, 1);
+	delay(2000);
+	m_wr32(top, 0x58, 0x00800000u);
+	m_dsb();
+	m_pin_mode(gp, M_PIN_MCLK, 1);
+	delay(2000);
+	m_pin_out(gp, M_PIN_RST, 1);
+	delay(5000);
+	return 0;
+}
+
+static void m_power_off(void) {
+	vm_offset_t top = m_win[0].va, pw = top + M_PWRAP_OFF, gp = top + M_GPIO_OFF;
+	if (!top) return;
+	m_pin_out(gp, M_PIN_RST, 0);
+	m_pin_mode(gp, M_PIN_MCLK, 0);
+	if (m_cfg1_orig & 0x00800000u) m_wr32(top, 0x54, 0x00800000u);
+	m_pin_out(gp, M_PIN_DVDD, 0);
+	if (m_have_io && !(m_vcamio_orig & 1u)) m_pwrap_wr(pw, M_VCAMIO_EN, m_vcamio_orig);
+	m_pin_out(gp, M_PIN_AVDD, 0);
+	pa_wr32(0x1000c014ULL, m_apmix_orig);
+	if (m_domain_by_us) {
+		pa_wr32(0x100012a8ULL, 0x00280000u); (void)m_poll(0x10001258ULL, 0x00280000u, 0x00280000u, 20);
+		pa_wr32(0x100012a0ULL, 0x00100000u); (void)m_poll(0x10001228ULL, 0x00100000u, 0x00100000u, 20);
+		pa_wr32(0x140023c4ULL, 8); (void)m_poll(0x140023c0ULL, 8, 8, 20);
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) | (3u << 8));
+		(void)m_poll(0x10006344ULL, 3u << 12, 3u << 12, 20);
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) | (1u << 1) | (1u << 4));
+		pa_wr32(0x10006344ULL, pa_rd32(0x10006344ULL) & ~((1u << 0) | (1u << 2) | (1u << 3)));
+	}
+	pa_wr32(0x14000104ULL, m_mm_cg_orig & 0x02000000u);
+	if (m_cfg7_orig & 0x80008000u) m_wr32(top, 0xb4, m_cfg7_orig & 0x80008000u);
+	if (m_cfg6_orig & 0x00800000u) m_wr32(top, 0xa4, 0x00800000u);
+}
+
+static int m_sensor_start(void) {
+	vm_offset_t gp = m_win[0].va + M_GPIO_OFF;
+	m_scl_mode = (m_rd32(gp, 0x300 + 0x10 * (M_PIN_SCL / 8)) >> (4 * (M_PIN_SCL % 8))) & 0xfu;
+	m_sda_mode = (m_rd32(gp, 0x300 + 0x10 * (M_PIN_SDA / 8)) >> (4 * (M_PIN_SDA % 8))) & 0xfu;
+	m_pin_mode(gp, M_PIN_SCL, 0);
+	m_pin_mode(gp, M_PIN_SDA, 0);
+	m_bb_scl(gp, 1);
+	m_bb_sda(gp, 1);
+
+	uint8_t hi = 0, lo = 0;
+	if (m_bb_read8(gp, M_SENSOR_ADDR7, 0x0000, &hi) || m_bb_read8(gp, M_SENSOR_ADDR7, 0x0001, &lo) || ((hi << 8) | lo) != 0x08d1) {
+		say("sensor_start: bad ID %02x%02x", hi, lo);
+		return EIO;
+	}
+	say("sensor_start: S5KGM1SP ID 0x08d1, writing init (%lu) + preview (%lu)",
+	    (unsigned long)(sizeof(gm1sp_init) / sizeof(gm1sp_init[0])),
+	    (unsigned long)(sizeof(gm1sp_preview) / sizeof(gm1sp_preview[0])));
+	for (unsigned i = 0; i < sizeof(gm1sp_init) / sizeof(gm1sp_init[0]); i++) {
+		if (!m_bb_write16(gp, M_SENSOR_ADDR7, gm1sp_init[i].reg, gm1sp_init[i].val)) {
+			say("sensor_start: init write %u (%#x) failed", i, gm1sp_init[i].reg);
+			return EIO;
+		}
+		if (gm1sp_init[i].reg == 0x6010) delay(5000);
+	}
+	for (unsigned i = 0; i < sizeof(gm1sp_preview) / sizeof(gm1sp_preview[0]); i++) {
+		if (!m_bb_write16(gp, M_SENSOR_ADDR7, gm1sp_preview[i].reg, gm1sp_preview[i].val)) {
+			say("sensor_start: preview write %u (%#x) failed", i, gm1sp_preview[i].reg);
+			return EIO;
+		}
+	}
+	if (!m_bb_write16(gp, M_SENSOR_ADDR7, 0x0100, 0x0100)) {
+		say("sensor_start: stream on failed");
+		return EIO;
+	}
+	m_cur_exp = 0x0400; m_cur_gain = 0x0100; m_cur_fll = 0x0c7a;
+	return 0;
+}
+
+static void m_sensor_stop(void) {
+	vm_offset_t gp = m_win[0].va + M_GPIO_OFF;
+	(void)m_bb_write16(gp, M_SENSOR_ADDR7, 0x0100, 0x0000);
+	delay(5000);
+	m_pin_mode(gp, M_PIN_SCL, m_scl_mode);
+	m_pin_mode(gp, M_PIN_SDA, m_sda_mode);
+}
+
+static int m_rx_start(void) {
+	for (unsigned k = 0; k < M_NBUF; k++) {
+		volatile uint64_t *p = (volatile uint64_t *)m_img_va[k];
+		for (uint64_t i = 0; i < M_BUF_BYTES / 8; i++) p[i] = 0;
+		m_inval((volatile void *)m_img_va[k], M_BUF_BYTES);
+	}
+	for (int port = 0; port < 21; port++) {
+		pa_wr32(0x1a002380ULL + 4 * (uint64_t)port, 0);
+	}
+	m_dsb();
+	for (unsigned i = 0; i < sizeof(gm1sp_rx) / sizeof(gm1sp_rx[0]); i++) {
+		pa_wr32(gm1sp_rx[i].addr, gm1sp_rx[i].val);
+		m_dsb();
+	}
+	for (unsigned i = 0; i < sizeof(gm1sp_sv) / sizeof(gm1sp_sv[0]); i++) {
+		if (gm1sp_sv[i].addr == 0x1a051500u || gm1sp_sv[i].addr == 0x1a051504u) continue;
+		pa_wr32(gm1sp_sv[i].addr, gm1sp_sv[i].val);
+		m_dsb();
+	}
+	pa_wr32(0x1a051230ULL, M_W - 1);
+	pa_wr32(0x1a051234ULL, M_H - 1);
+	pa_wr32(0x1a051238ULL, (pa_rd32(0x1a051238ULL) & 0xffff0000u) | M_W);
+	m_dsb();
+	for (unsigned k = 0; k < M_NBUF; k++) {
+		pa_wr32(0x1a051118ULL, m_img_pa[k]);
+		pa_wr32(0x1a051e04ULL, m_hdr_pa[k]);
+		m_dsb();
+		pa_wr32(0x1a05102cULL, pa_rd32(0x1a05102cULL) | 1u);
+		m_dsb();
+		delay(500);
+	}
+	for (unsigned i = 0; i < sizeof(gm1sp_sv) / sizeof(gm1sp_sv[0]); i++) {
+		if (gm1sp_sv[i].addr == 0x1a051500u || gm1sp_sv[i].addr == 0x1a051504u) {
+			pa_wr32(gm1sp_sv[i].addr, gm1sp_sv[i].val);
+			m_dsb();
+		}
+	}
+	m_poll_idx = 0;
+	say("rx_start: SENINF + CAMSV1 streaming 4000x3000");
+	return 0;
+}
+
+static void m_rx_stop(void) {
+	pa_wr32(0x1a051504ULL, 0);
+	pa_wr32(0x1a051500ULL, pa_rd32(0x1a051500ULL) & ~1u);
+	m_dsb();
+	delay(5000);
+}
+
+static int m_frame_done(struct mtkcam_frame_meta *meta) {
+	for (unsigned n = 0; n < M_NBUF; n++) {
+		unsigned k = (m_poll_idx + n) % M_NBUF;
+		volatile uint8_t *tail = (volatile uint8_t *)(m_img_va[k] + M_BUF_BYTES - 64);
+		m_inval(tail, 64);
+		for (unsigned i = 0; i < 64; i++) {
+			if (tail[i] != 0) {
+				m_poll_idx = (k + 1) % M_NBUF;
+				meta->exposure_lines = m_cur_exp;
+				meta->gain = m_cur_gain;
+				meta->frame_lines = m_cur_fll;
+				return (int)k;
+			}
+		}
+	}
+	return -1;
+}
+
+static void m_read_lines(unsigned buf, uint32_t first, uint32_t lines, uint8_t *dst) {
+	const volatile uint8_t *src = (const volatile uint8_t *)(m_img_va[buf] + (uint64_t)first * M_W);
+	m_inval((volatile void *)src, (uint64_t)lines * M_W);
+	for (uint32_t y = 0; y < lines; y++) {
+		const volatile uint8_t *s = src + (uint64_t)y * M_W;
+		uint8_t *d = dst + (uint64_t)y * (M_W * 5 / 4);
+		for (uint32_t x = 0; x < M_W; x += 4, d += 5) {
+			d[0] = s[x];
+			d[1] = s[x + 1];
+			d[2] = s[x + 2];
+			d[3] = s[x + 3];
+			d[4] = 0;
+		}
+	}
+}
+
+static void m_frame_release(unsigned buf) {
+	volatile uint8_t *tail = (volatile uint8_t *)(m_img_va[buf] + M_BUF_BYTES - 64);
+	for (unsigned i = 0; i < 64; i++) tail[i] = 0;
+	m_inval(tail, 64);
+	pa_wr32(0x1a051118ULL, m_img_pa[buf]);
+	pa_wr32(0x1a051e04ULL, m_hdr_pa[buf]);
+	m_dsb();
+	pa_wr32(0x1a05102cULL, pa_rd32(0x1a05102cULL) | 1u);
+	m_dsb();
+}
+
+static int m_set_exposure(uint32_t lines, uint32_t gain, uint32_t frame_lines) {
+	vm_offset_t gp = m_win[0].va + M_GPIO_OFF;
+	if (frame_lines == 0) {
+		frame_lines = lines + 8;
+		if (frame_lines < 0x0c7a) frame_lines = 0x0c7a;
+	}
+	if (!m_bb_write16(gp, M_SENSOR_ADDR7, 0x0340, (uint16_t)frame_lines)) return EIO;
+	if (!m_bb_write16(gp, M_SENSOR_ADDR7, 0x0202, (uint16_t)lines)) return EIO;
+	if (!m_bb_write16(gp, M_SENSOR_ADDR7, 0x0204, (uint16_t)gain)) return EIO;
+	m_cur_exp = lines;
+	m_cur_gain = gain;
+	m_cur_fll = frame_lines;
+	return 0;
+}
 
 /* ---- the platform check ---- */
 static bool
@@ -456,6 +941,7 @@ redwood_mtkcam_skel_init(void)
 	if (!PE_parse_boot_argn("mtkcam_skel", &level, sizeof(level)) || level < 1) {
 		return;
 	}
+	(void)m_alloc_bufs();
 	if (kernel_thread_start_priority(skel_thread, NULL, 81 /* BASEPRI_KERNEL */, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

@@ -15,9 +15,10 @@ import gzip
 import hashlib
 import struct
 import sys
+import zlib
 
 CHAIN_OFFSET = 0x40000
-BOOT_PARTITION = 32 << 20
+BOOT_PARTITION = 64 << 20
 
 
 def pad(b, n):
@@ -44,7 +45,13 @@ def main():
     rdo = d[off:off + rdo_size]; off += pages(rdo_size)
     dtb = d[off:off + dtb_size]
 
-    image = gzip.decompress(kernel) if kernel[:2] == b'\x1f\x8b' else kernel
+    if kernel[:2] == b'\x1f\x8b':
+        # Handle Image.gz-dtb (trailing appended DTB after gzip member causes gzip.decompress to fail).
+        dec = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        image = dec.decompress(kernel)
+        assert dec.eof, 'truncated gzipped Android kernel'
+    else:
+        image = kernel
     assert image[0x38:0x3c] == b'ARM\x64', 'Android kernel is not an arm64 Image'
     linux_image_size = struct.unpack_from('<Q', image, 0x10)[0]
 

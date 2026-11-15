@@ -128,11 +128,10 @@ SILEO_BIN="chmod cp mkdir mv rm"
 # (libredwood-tweaks is the tweak loader of the package manager's prefix, src/inject_tweaks.c: in
 # SpringBoard the library above opens it, here it is named for the programs that have no library of
 # ours -- Settings, where a tweak's own pane belongs. Add a program's name to have tweaks in it.)
-INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system com.apple.WebKit.GPU
+INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system com.apple.WebKit.GPU bluetoothd BlueTool Preferences
 /redwood/lib/libredwood-sb.dylib SpringBoard
-/redwood/lib/libredwood-media.dylib mediaserverd
-/redwood/lib/libredwood-app.dylib Sileo
-/redwood/lib/libredwood-tweaks.dylib Preferences"}
+/redwood/lib/libredwood-media.dylib mediaserverd Camera
+/redwood/lib/libredwood-app.dylib Sileo"}
 # APPLEID=1: the Apple ID / App Store libraries of ours as well (ported from origin/AppleID). Opt-in,
 # so every other image is untouched -- like aks_keys, these change daemons (accountsd, akd, ...) that
 # must not be touched where no sign-in happens. libredwood.mad.dylib tells mobileactivationd the
@@ -223,11 +222,11 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 				-lc++ -I../tools/mesa/air -Isrc -o obj/RedwoodMetal src/redwoodmetal.m \
 				obj/metal/air.o obj/metal/buffer.o obj/metal/log.o obj/metal/texture.o obj/metal/blit.o obj/metal/draw.o obj/metal/command.o obj/metal/recipes.o obj/metal/import.o obj/metal/perf.o obj/metal/plib.o obj/metal/shape.o obj/metal/argenc.o obj/metal/run.o obj/metal/worker.o obj/metal/surfaces.o obj/metal/render.o obj/metal/compute.o obj/metal/cmdbuf.o obj/metal/pipeline.o obj/metal/drawable.o
 			$DYN -framework CoreFoundation -framework IOKit -o obj/metal_props src/metal_props.c
-			$DYN -o obj/tolog src/tolog.c
 			$DYN -o obj/psgrep src/psgrep.c
 			$DYN -framework Foundation -framework IOKit -framework Metal -lobjc \
 				-o obj/metal_drv_test src/metal_drv_test.m
 		fi
+		$DYN -o obj/tolog src/tolog.c
 		$DYN -o obj/shm_test src/shm_test.c
 		$DYN -o obj/apfs_mmap_test src/apfs_mmap_test.c
 		$DYN -o obj/vol_ls src/vol_ls.c
@@ -247,6 +246,10 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -framework CoreFoundation -framework Security -o obj/wifipw_test src/wifipw_test.c &&
 			{ ${LDID:-ldid} -Ssrc/wifipw_test.entitlements obj/wifipw_test 2>/dev/null ||
 			  echo "build.sh: no ldid: wifipw_test is unsigned, and the keychain will refuse it (-34018)"; }
+		# (aks_restore makes /private/var/keybags/systembag.kb before launchd for keybagd/bluetoothd)
+		$DYN -framework CoreFoundation -framework IOKit -o obj/aks_restore src/aks_restore.c &&
+			{ ${LDID:-ldid} -Ssrc/aks_restore.entitlements obj/aks_restore 2>/dev/null ||
+			  echo "build.sh: no ldid: aks_restore is unsigned"; }
 		# our library for inside stock iOS programs (the jobs in INJECT are started with it)
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libredwood.dylib src/inject.c
@@ -310,6 +313,8 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
+	[ -f obj/aks_restore ] && cp obj/aks_restore root/bin/
+	[ -f obj/tolog ] && cp obj/tolog root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	[ -f obj/torch_test ] && cp obj/torch_test root/bin/
 	[ -f obj/camera_test ] && cp obj/camera_test root/bin/
@@ -478,6 +483,11 @@ done
 if [ -n "$ADSP" ] && [ -f ../fw-audio/adsp.mdt ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] root/fw/
+fi
+# CONNSYS Wi-Fi + BT firmware (redwood_connsys.c checks /redwood/fw/connsys/ before /fw/connsys/)
+if [ -f ../xnu-deps/build/connsys-fw/firmware/WIFI_RAM_CODE_soc1_0_1a_1.bin ]; then
+	mkdir -p root/fw/connsys
+	install -m 0644 ../xnu-deps/build/connsys-fw/firmware/* root/fw/connsys/
 fi
 # Firmware that is not there is otherwise silent at build time and speaks only much later, deep in a
 # device log -- "adreno: THE GPU IS NOT STARTED: the small image has no fw/a660_gmu.bin" cost a phone

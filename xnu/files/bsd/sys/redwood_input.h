@@ -42,6 +42,7 @@ void redwood_input_init(void);
 void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
 void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
 void redwood_tcm_init(void);            /* boot-arg touchscreen=2: the Infinix's OmniVision TD4160 */
+void redwood_nvt_init(void);            /* boot-arg touchscreen=3: the Redmi Note 9's Novatek NT36672A */
 void redwood_mali_init(void);            /* boot-arg mali=1: the Infinix's Mali-G52 brought up */
 void redwood_mtkkeys_init(void);         /* boot-arg buttons=2: the Infinix's power and volume keys */
 void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
@@ -85,6 +86,7 @@ void redwood_pwrap_lock(void);          /* the MT6358 PMIC wrapper (0x1000d000) 
 void redwood_pwrap_unlock(void);
 void redwood_mtkbatt_init(void);        /* boot-arg mtkbatt=1: the Infinix's battery from the PMIC's BATADC, to iOS's power source */
 void redwood_mtkcam_init(void);         /* boot-arg mtkcam=1: the Infinix's main camera (S5K JN1), one capture into memory, then all off */
+void redwood_mtkcam_skel_init(void);    /* boot-arg mtkcam_skel=1: skeleton camera driver */
 /* CONNSYS's memory (Android's consys-reserve-memory), and the AP's the Wi-Fi's DMA and BTIF's FIFO use (its
  * wifi-reserve-memory): both outside XNU's, which begins at 0xc0000000 (mtkloader.c) */
 #define REDWOOD_CONNSYS_EMI_PHYS        0x51000000u

@@ -377,9 +377,12 @@ connsys_file(const char *name, uint32_t *size)
 	uint8_t *data;
 	int left = 0;
 
-	snprintf(path, sizeof(path), "/fw/connsys/%s", name);
+	snprintf(path, sizeof(path), "/redwood/fw/connsys/%s", name);
 	if (vnode_lookup(path, 0, &vnode, context) != 0) {
-		return NULL;
+		snprintf(path, sizeof(path), "/fw/connsys/%s", name);
+		if (vnode_lookup(path, 0, &vnode, context) != 0) {
+			return NULL;
+		}
 	}
 	VATTR_INIT(&attributes);
 	VATTR_WANTED(&attributes, va_data_size);
@@ -1319,6 +1322,7 @@ static uint32_t bt_said_packets_in, bt_said_packets_out;
 static void
 bt_dump(const char *direction, const uint8_t *bytes, unsigned length, uint32_t *counter)
 {
+	return;
 	char text[3 * 32 + 1];
 
 	if (direction[0] == 'i' && length == 7 && bytes[1] == 0x0e && bytes[2] == 4 && bytes[6] == 0 && (bytes[5] >> 2) != 0x3f && false) {
@@ -1442,8 +1446,13 @@ bt_quirks(uint8_t *packet, unsigned length)
 		}
 		return 7 + extra;
 	}
-	if (length == 7 && memcmp(packet, "\x04\x0f\x04\x01\x01\x5b\x0c", 7) == 0) {
+	if (length == 7 &&
+	    ((packet[0] == 0x04 && packet[1] == 0x0f && packet[2] == 0x04 && packet[4] == 0x01 &&
+	      packet[5] == 0x5b && packet[6] == 0x0c && packet[3] != 0x00) ||
+	     (packet[0] == 0x04 && packet[1] == 0x0e && packet[2] == 0x04 &&
+	      packet[4] == 0x5b && packet[5] == 0x0c && packet[6] != 0x00))) {
 		packet[1] = 0x0e;
+		packet[3] = 0x01;
 		packet[4] = 0x5b;
 		packet[5] = 0x0c;
 		packet[6] = 0x00;
@@ -1453,7 +1462,18 @@ bt_quirks(uint8_t *packet, unsigned length)
 		for (unsigned i = 0; i < 4; i++) {
 			packet[7 + 25 + i] |= le_commands[i];
 		}
+		packet[7 + 18] |= 0x0c;         /* octet 18 bits 2, 3: Read and Write Default Erroneous Data Reporting (status 628) */
 		packet[7 + 24] |= 0x60;         /* octet 24 bits 5, 6: Read and Write LE Host Support (run 616: WriteLeHostSupported, status 628) */
+	}
+	if (length == 7 && packet[0] == 0x04 && packet[1] == 0x0e && packet[2] == 0x04 && packet[3] == 0x01 &&
+	    packet[5] == 0x20 && (packet[4] == 0x0b || packet[4] == 0x0c) && packet[6] == 0x0c) {
+		packet[6] = 0x00;
+		return 7;
+	}
+	if (length >= 7 && packet[0] == 0x04 &&
+	    ((packet[1] == 0x0f && packet[3] != 0x00) || (packet[1] == 0x0e && packet[6] != 0x00))) {
+		printf("connsys: bt hci err len=%u: %02x %02x %02x %02x %02x %02x %02x\n",
+		    length, packet[0], packet[1], packet[2], packet[3], packet[4], packet[5], packet[6]);
 	}
 	return length;
 }

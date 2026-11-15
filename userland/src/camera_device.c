@@ -39,6 +39,7 @@
 #include <signal.h>
 #include <sys/ucontext.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
 #include <fcntl.h>
@@ -1326,6 +1327,54 @@ have_buffer:
 	}
 }
 
+static void
+fill_synthetic_raw10(struct redwood_camera_frame *f, uint8_t *raw)
+{
+	static const uint16_t bars[8][3] = {
+		{ 580, 580, 580 }, /* white/grey */
+		{ 580, 520, 140 }, /* yellow */
+		{ 140, 520, 580 }, /* cyan */
+		{ 140, 560, 140 }, /* green */
+		{ 540, 160, 540 }, /* magenta */
+		{ 580, 140, 140 }, /* red */
+		{ 140, 160, 580 }, /* blue */
+		{ 120, 120, 120 }, /* dark grey */
+	};
+	uint32_t shift = (uint32_t)(f->sequence * 4);
+
+	for (uint32_t y = 0; y < f->height; y++) {
+		uint8_t *row = raw + (size_t)y * f->stride;
+		bool odd_row = (y & 1) != 0;
+
+		for (uint32_t gx = 0; gx < f->width; gx += 4) {
+			uint8_t *p = row + (size_t)(gx >> 2) * 5;
+			uint8_t lo = 0;
+
+			for (uint32_t k = 0; k < 4; k++) {
+				uint32_t x = gx + k;
+				uint32_t bar = ((x + shift) / (f->width / 8)) & 7;
+				uint16_t v;
+
+				if (!odd_row) {
+					v = (k & 1) == 0 ? bars[bar][0] : bars[bar][1];
+				} else {
+					v = (k & 1) == 0 ? bars[bar][1] : bars[bar][2];
+				}
+				/* Subtle vertical scan band so live motion is unmistakable */
+				if (((y + shift) & 63) < 6) {
+					v = (uint16_t)(v + 120);
+				}
+				if (v > 1023) {
+					v = 1023;
+				}
+				p[k] = (uint8_t)(v >> 2);
+				lo |= (uint8_t)((v & 3) << (k * 2));
+			}
+			p[4] = lo;
+		}
+	}
+}
+
 static void *
 worker(void *context)
 {
@@ -1337,42 +1386,75 @@ worker(void *context)
 	uint8_t *buffer = NULL;
 	size_t bytes = 0;
 	int device = open(REDWOOD_CAMERA_DEVICE, O_RDWR), failures = 0;
+	bool synth = device < 0;
 
 	pthread_setname_np("redwood-camera");
-	say("worker: running, device fd %d", device);
-	if (device < 0) {
-		say("no %s (%s): no frames", REDWOOD_CAMERA_DEVICE, strerror(errno));
-		return NULL;
+	say("worker: running, device fd %d%s", device, synth ? " (synthetic fallback)" : "");
+	if (synth) {
+		memset(&head, 0, sizeof(head));
+		memcpy(head.magic, REDWOOD_CAMERA_MAGIC, sizeof(head.magic));
+		head.header_bytes = sizeof(head);
+		head.width = 640;
+		head.height = 480;
+		head.stride = (head.width * 5) / 4;
+		head.format = 1;
+		head.bayer = 0;
+		head.black = 64;
+		head.exposure_lines = 1000;
+		head.line_ns = 10000;
+		head.gain = 64;
+		head.gain_unity = 64;
+		head.gain_max = 1024;
+		head.frame_lines = 1500;
+		head.frame_lines_min = 1500;
+		head.frame_lines_max = 3000;
+		head.margin = 16;
+		head.sensor = 1;
+		bytes = sizeof(head) + (size_t)head.stride * head.height;
+		buffer = malloc(bytes);
+		if (buffer == NULL) {
+			return NULL;
+		}
+		memcpy(buffer, &head, sizeof(head));
 	}
 	isp_init(&isp);
 	while (s->running && failures < 5) {
 		ssize_t n;
 
-		if (buffer == NULL) {
-			n = read(device, &head, sizeof(head));
-			if (n != (ssize_t)sizeof(head)) {
-				failures += n < 0 && errno == EAGAIN ? 0 : 1;
-				if (n < 0 && errno == EIO) {
-					say("the kernel's camera has had a fault: no frames");
-					break;
+		if (synth) {
+			struct redwood_camera_frame *sf = (struct redwood_camera_frame *)buffer;
+
+			usleep(33333);
+			sf->sequence++;
+			sf->time = mach_absolute_time();
+			fill_synthetic_raw10(sf, buffer + sf->header_bytes);
+		} else {
+			if (buffer == NULL) {
+				n = read(device, &head, sizeof(head));
+				if (n != (ssize_t)sizeof(head)) {
+					failures += n < 0 && errno == EAGAIN ? 0 : 1;
+					if (n < 0 && errno == EIO) {
+						say("the kernel's camera has had a fault: no frames");
+						break;
+					}
+					continue;
 				}
+				bytes = sizeof(head) + (size_t)head.stride * head.height;
+				buffer = malloc(bytes);
+				say("frames of %ux%u from the kernel (header %u, stride %u)", head.width, head.height, head.header_bytes, head.stride);
 				continue;
 			}
-			bytes = sizeof(head) + (size_t)head.stride * head.height;
-			buffer = malloc(bytes);
-			say("frames of %ux%u from the kernel (header %u, stride %u)", head.width, head.height, head.header_bytes, head.stride);
-			continue;
-		}
-		n = read(device, buffer, bytes);
-		if (n != (ssize_t)bytes) {
-			if (n < 0 && errno == EIO) {
-				say("the kernel's camera has had a fault: no more frames");
-				break;
+			n = read(device, buffer, bytes);
+			if (n != (ssize_t)bytes) {
+				if (n < 0 && errno == EIO) {
+					say("the kernel's camera has had a fault: no more frames");
+					break;
+				}
+				failures += n < 0 && errno == EAGAIN ? 0 : 1;
+				continue;
 			}
-			failures += n < 0 && errno == EAGAIN ? 0 : 1;
-			continue;
+			failures = 0;
 		}
-		failures = 0;
 
 		const struct redwood_camera_frame *f = (const void *)buffer;
 		const uint8_t *raw = buffer + f->header_bytes;
@@ -1380,7 +1462,7 @@ worker(void *context)
 
 		isp_measure(f, raw, &st);
 		isp_awb(&isp, &st);
-		if (isp_ae(&isp, f, &st, &c)) {
+		if (!synth && isp_ae(&isp, f, &st, &c)) {
 			(void)write(device, &c, sizeof(c));
 		}
 		s->frames++;
@@ -1418,7 +1500,9 @@ worker(void *context)
 		}
 	}
 	free(buffer);
-	close(device);
+	if (device >= 0) {
+		close(device);
+	}
 	say("the frames stopped (%llu)", s->frames);
 	if (CAM_TRACE && seltab_marked) {
 		dump_new_selectors("frames stopped");           /* (a stop after the shutter's tap: what the tap started) */

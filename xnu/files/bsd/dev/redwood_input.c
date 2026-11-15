@@ -218,6 +218,7 @@ redwood_input_init(void)
 	redwood_virtio_input_init();
 	redwood_goodix_init();
 	redwood_tcm_init();
+	redwood_nvt_init();
 	redwood_buttons_init();
 	redwood_mtkkeys_init();
 	redwood_battery_init();
@@ -227,7 +228,7 @@ redwood_input_init(void)
 	redwood_mali_init();
 	redwood_connsys_init();
 	redwood_scp_init();
-	redwood_mtkcam_init();
+	redwood_mtkcam_skel_init();
 	redwood_mtkbatt_init();
 	redwood_wifi_init();
 	redwood_adsp_init();

@@ -40,6 +40,7 @@
 #include <notify.h>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <os/log.h>
 #include <pthread.h>
 
 static void *prof_main(void *unused);  /* bbd_prof=1 */
@@ -2804,9 +2805,6 @@ bt_hooks(uintptr_t base)
  * call, and its two arguments are what the console loses with the instance (run 635 shows only the way there). _os_log_impl is
  * interposed in bluetoothd's own calls; the format is looked at, and when it is that one the reason and the context are said.
  */
-extern void _os_log_impl(void *dso, void *log, int type, const char *format, uint8_t *buf, uint32_t size);
-extern void _os_log_error_impl(void *dso, void *log, int type, const char *format, uint8_t *buf, uint32_t size);
-extern void _os_log_fault_impl(void *dso, void *log, int type, const char *format, uint8_t *buf, uint32_t size);
 
 /* the call's text: its format with its string arguments (a "%{public}s" made of the message the program built) put in, for what is said */
 static bool bluetoothd_after_start, bluetoothd_on;
@@ -2914,6 +2912,141 @@ os_log_watched(const char *how, const char *format, uint8_t *buf, uint32_t size)
 
 /* Settings' own log lines about Bluetooth and pairing (their formats and string arguments), for the Bluetooth pane's "Pairing Unsuccessful" (run 744) */
 static void
+pref_console(const char *line)
+{
+	static int fd = -2;
+	char buf[420];
+	int n;
+
+	if (fd == -2) {
+		fd = open("/dev/console", O_WRONLY | O_NOCTTY);
+	}
+	if (fd >= 0) {
+		n = snprintf(buf, sizeof(buf), "%s\n", line);
+		if (n > 0) {
+			(void)write(fd, buf, (size_t)(n < (int)sizeof(buf) ? n : (int)sizeof(buf) - 1));
+		}
+	}
+}
+
+static os_log_t pref_log;
+static thread_t pref_main_thread;
+static volatile uint32_t pref_heartbeat;
+
+static void
+pref_say(const char *msg)
+{
+	char kept[256];
+
+	snprintf(kept, sizeof(kept), "!%s\n", msg);
+	(void)sysctlbyname("kern.redwood.say", NULL, NULL, kept, strlen(kept));
+	(void)sysctlbyname("kern.redwood.host_keep", NULL, NULL, msg, strlen(msg));
+	os_log_error(pref_log, "%{public}s", msg);
+}
+
+static void
+pref_hang_frame(unsigned i, uintptr_t address)
+{
+	Dl_info info;
+	char msg[220];
+
+	if (dladdr((void *)address, &info) && info.dli_sname != NULL) {
+		const char *image = info.dli_fname ? strrchr(info.dli_fname, '/') : NULL;
+
+		snprintf(msg, sizeof(msg), "pref hang #%u %s+%#lx (%s)", i, info.dli_sname,
+		    (unsigned long)(address - (uintptr_t)info.dli_saddr), image ? image + 1 : "?");
+	} else {
+		snprintf(msg, sizeof(msg), "pref hang #%u %#lx", i, (unsigned long)address);
+	}
+	pref_say(msg);
+}
+
+static void
+pref_crash_signal(int sig, siginfo_t *si, void *ucp)
+{
+	void *frames[24];
+	int n = backtrace(frames, 24);
+	char hdr[180];
+
+	snprintf(hdr, sizeof(hdr), "Preferences CRASH sig=%d code=%d addr=%p",
+	    sig, si ? si->si_code : 0, si ? si->si_addr : NULL);
+	pref_say(hdr);
+	for (int i = 0; i < n; i++) {
+		pref_hang_frame((unsigned)i, (uintptr_t)frames[i]);
+	}
+	(void)ucp;
+	signal(sig, SIG_DFL);
+	raise(sig);
+}
+
+static void
+pref_crash_install(void)
+{
+	struct sigaction sa;
+
+	bzero(&sa, sizeof(sa));
+	sa.sa_sigaction = pref_crash_signal;
+	sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+	sigaction(SIGABRT, &sa, NULL);
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS, &sa, NULL);
+	sigaction(SIGILL, &sa, NULL);
+	sigaction(SIGTRAP, &sa, NULL);
+}
+
+static void *
+pref_hang_watch(__unused void *argument)
+{
+	uint32_t seen = 0;
+	unsigned quiet = 0, told = 0;
+
+	pthread_setname_np("redwood pref hang watch");
+	while (told < 3) {
+		dispatch_async(dispatch_get_main_queue(), ^{
+			pref_heartbeat++;
+		});
+		sleep(1);
+		if (pref_heartbeat != seen) {
+			seen = pref_heartbeat;
+			quiet = 0;
+			continue;
+		}
+		if (++quiet < 3) {
+			continue;
+		}
+		arm_thread_state64_t state;
+		mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+
+		if (thread_suspend(pref_main_thread) != KERN_SUCCESS) {
+			break;
+		}
+		if (thread_get_state(pref_main_thread, ARM_THREAD_STATE64, (thread_state_t)&state, &count) == KERN_SUCCESS) {
+			uintptr_t fp = (uintptr_t)arm_thread_state64_get_fp(state);
+			char hdr[160];
+
+			snprintf(hdr, sizeof(hdr), "Preferences hang: main thread stuck for %u s (hb %u)", quiet, pref_heartbeat);
+			pref_say(hdr);
+			pref_hang_frame(0, (uintptr_t)arm_thread_state64_get_pc(state));
+			pref_hang_frame(1, (uintptr_t)arm_thread_state64_get_lr(state));
+			for (unsigned i = 2; i < 24 && fp != 0 && (fp & 7) == 0; i++) {
+				uintptr_t next = ((uintptr_t *)fp)[0], ret = ((uintptr_t *)fp)[1];
+
+				pref_hang_frame(i, ret & 0x0000000fffffffffULL);
+				if (next <= fp) {
+					break;
+				}
+				fp = next;
+			}
+		}
+		thread_resume(pref_main_thread);
+		told++;
+		quiet = 0;
+		sleep(2);
+	}
+	return NULL;
+}
+
+static void
 preferences_log_watched(const char *format, const uint8_t *buf, uint32_t size)
 {
 	static unsigned said;
@@ -2931,13 +3064,14 @@ preferences_log_watched(const char *format, const uint8_t *buf, uint32_t size)
 		}
 		said++;
 		snprintf(line, sizeof(line), "redwood: Preferences log: %.220s%s", format, text);
+		pref_console(line);
 		(void)sysctlbyname("kern.redwood.host_keep", NULL, NULL, line, strnlen(line, sizeof(line)));
 	}
 }
 
 #define OS_LOG_WATCHED(name, how)                                                                              \
 static void                                                                                                    \
-name##_watched(void *dso, void *log, int type, const char *format, uint8_t *buf, uint32_t size)               \
+name##_watched(void *dso, os_log_t log, os_log_type_t type, const char *format, uint8_t *buf, uint32_t size)   \
 {                                                                                                              \
 	if (in_bluetoothd && format != NULL && buf != NULL && size >= 2) {                                  \
 		os_log_watched(how, format, buf, size);                                                        \
@@ -2985,6 +3119,9 @@ watched_xpc_connection_create_mach_service(const char *name, dispatch_queue_t ta
 		char line[200];
 
 		snprintf(line, sizeof(line), "redwood: %s[%d] xpc_connection_create_mach_service(%s, %#llx) -> %p", in_preferences ? "Preferences" : "bluetoothd", getpid(), name, (unsigned long long)flags, connection);
+		if (in_preferences) {
+			pref_console(line);
+		}
 		(void)sysctlbyname("kern.redwood.host_keep", NULL, NULL, line, strnlen(line, sizeof(line)));
 	}
 	return connection;
@@ -3137,7 +3274,15 @@ redwood_init(void)
 		snprintf(line, sizeof(line), "redwood: bluetoothd[%d] is watched, exit sites %lx %lx", getpid(), (unsigned long)bluetoothd_exit_site1, (unsigned long)bluetoothd_exit_site2);
 		(void)sysctlbyname("kern.redwood.host_keep", NULL, NULL, line, strnlen(line, sizeof(line)));
 	} else if (strcmp(name, "Preferences") == 0) {
+		pthread_t thread;
+
 		in_preferences = true;           /* Settings: its XPC to bluetoothd is said (Bluetooth pane, run 732) */
+		pref_log = os_log_create("com.apple.Preferences", "redwood");
+		pref_say("Preferences: libredwood.dylib loaded");
+		pref_crash_install();
+		pref_main_thread = mach_thread_self();
+		pthread_create(&thread, NULL, pref_hang_watch, NULL);
+		pthread_detach(thread);
 	} else if (strcmp(name, "BlueTool") == 0) {
 		bluetool_serves();
 	} else if (strcmp(name, "com.apple.WebKit.GPU") == 0) {

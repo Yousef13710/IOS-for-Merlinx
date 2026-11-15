@@ -61,6 +61,7 @@
 extern void loader_return(void);
 extern void loader_log_putc(char c);
 extern unsigned long gVirtBase, gPhysBase;
+extern uint64_t loader_stub_slot[];
 
 /* The firmware is called with HVC, not SMC. (start.s reads this too, at its physical address.) */
 uint32_t psci_smp_hvc;
@@ -189,7 +190,9 @@ psci_smp_start_cpu(int cpu)
 	__builtin_arm_dsb(DSB_SY);
 
 	os_atomic_store(&psci_smp_cpu_stage[cpu], PSCI_SMP_CPU_ASKED, release);
-	status = psci_call(PSCI_CPU_ON, phys_id, entry, 0);
+	uint64_t call_entry = (loader_stub_slot[0] == 0x545352444c554e58ULL && loader_stub_slot[4] != 0)
+	    ? loader_stub_slot[4] : entry;
+	status = psci_call(PSCI_CPU_ON, phys_id, call_entry, entry);
 	if (status != 0) {
 		os_atomic_store(&psci_smp_cpu_stage[cpu], 0, release);
 		printf("psci: cpu %d (MPIDR 0x%x) was not started: the firmware answers %lld (%s)\n",

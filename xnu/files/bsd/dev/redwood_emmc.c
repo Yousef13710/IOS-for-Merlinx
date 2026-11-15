@@ -37,6 +37,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
 #define MSDC0_PHYS       0x11230000u
 #define EMMC_PART        "xnusys"
+#define EMMC_DATA_PART   "iosdata"
 #define EMMC_MAX_BLOCKS  256                /* 128 KB a command */
 
 #define MSDC_CFG         0x00
@@ -44,6 +45,7 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #define MSDC_INT         0x0c
 #define MSDC_FIFOCS      0x14
 #define MSDC_FIFOCS_CLR  (1u << 31)
+#define MSDC_TXDATA      0x18
 #define MSDC_RXDATA      0x1c
 #define SDC_CMD          0x34
 #define SDC_ARG          0x38
@@ -62,16 +64,25 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #define CMD_RSP_R1B      (6u << 7)
 #define CMD_DTYPE_SINGLE (1u << 11)
 #define CMD_DTYPE_MULTI  (2u << 11)
+#define CMD_WRITE        (1u << 13)
 #define CMD_STOP         (1u << 14)
 #define CMD_BLKLEN(n)    (((n) & 0xfffu) << 16)
 
 static vm_offset_t msdc;
+struct emmc_extent {
+	uint64_t lba;
+	uint64_t blocks;
+};
+#define MAX_EMMC_EXTS 16
+static struct emmc_extent emmc_exts[MAX_EMMC_EXTS];
+static uint32_t emmc_num_exts = 0;
 static uint64_t emmc_lba, emmc_blocks;      /* the partition: its first block, and the image's length in blocks */
+static uint64_t data_lba, data_blocks;      /* optional writable data partition ("iosdata", minor 1) */
 static int emmc_bmajor = -1, emmc_cmajor = -1;
 static uint32_t emmc_int_seen;              /* MSDC_INT bits read (reading clears them) but not yet used */
 static const char *emmc_failed;
 static uint32_t emmc_failed_status;
-static uint64_t emmc_reads, emmc_read_blocks, emmc_errors;
+static uint64_t emmc_reads, emmc_read_blocks, emmc_writes, emmc_write_blocks, emmc_errors;
 static LCK_GRP_DECLARE(emmc_lck_grp, "redwood-emmc");
 static LCK_MTX_DECLARE(emmc_lock, &emmc_lck_grp);
 
@@ -151,8 +162,48 @@ stop(void)
 
 /* blocks of 512 bytes from the card's block lba into dst (4-aligned) */
 static bool
+read_one_block(uint64_t lba, uint32_t *dst)
+{
+	if (!wait_idle()) {
+		return false;
+	}
+	pio_mode();
+	wr(SDC_BLK_NUM, 1);
+	wr(SDC_ARG, (uint32_t)lba);
+	wr(SDC_CMD, 17 | CMD_RSP_R1 | CMD_DTYPE_SINGLE | CMD_BLKLEN(512));
+	if (!wait_int(INT_CMDRDY, INT_CMDTMO | INT_RSPCRCERR, "command")) {
+		return false;
+	}
+	for (uint32_t left = 512 / 4; left;) {
+		uint32_t fifo = rd(MSDC_FIFOCS) & 0xff, spin = 0, words;
+
+		while (fifo < 4) {
+			uint32_t status = rd(MSDC_INT);
+
+			if (status & (INT_DATTMO | INT_DATCRCERR)) {
+				wr(MSDC_INT, status);
+				return fail("data", status);
+			}
+			if (++spin > 20000000) {
+				return fail("data stalled", rd(MSDC_FIFOCS));
+			}
+			fifo = rd(MSDC_FIFOCS) & 0xff;
+		}
+		words = fifo / 4 < left ? fifo / 4 : left;
+		for (uint32_t i = 0; i < words; i++) {
+			*dst++ = rd(MSDC_RXDATA);
+		}
+		left -= words;
+	}
+	return wait_int(INT_XFER_COMPL, INT_DATTMO | INT_DATCRCERR, "transfer end");
+}
+
+static bool
 read_blocks(uint64_t lba, uint32_t blocks, uint32_t *dst)
 {
+	if (blocks == 1) {
+		return read_one_block(lba, dst);
+	}
 	if (!wait_idle()) {
 		return false;
 	}
@@ -193,6 +244,118 @@ read_blocks(uint64_t lba, uint32_t blocks, uint32_t *dst)
 	return blocks == 1 || stop();
 }
 
+/* blocks of 512 bytes from src (4-aligned) to the card's block lba */
+static bool
+write_one_block(uint64_t lba, const uint32_t *src)
+{
+	if (!wait_idle()) {
+		return false;
+	}
+	pio_mode();
+	wr(SDC_BLK_NUM, 1);
+	wr(SDC_ARG, (uint32_t)lba);
+	wr(SDC_CMD, 24 | CMD_RSP_R1 | CMD_DTYPE_SINGLE | CMD_WRITE | CMD_BLKLEN(512));
+	if (!wait_int(INT_CMDRDY, INT_CMDTMO | INT_RSPCRCERR, "write cmd")) {
+		return false;
+	}
+	for (uint32_t left = 512 / 4; left;) {
+		uint32_t tx = (rd(MSDC_FIFOCS) >> 16) & 0xff, spin = 0, words;
+
+		while (tx >= 128) {
+			uint32_t status = rd(MSDC_INT);
+
+			if (status & (INT_DATTMO | INT_DATCRCERR)) {
+				wr(MSDC_INT, status);
+				return fail("write data", status);
+			}
+			if (++spin > 20000000) {
+				return fail("write stalled", rd(MSDC_FIFOCS));
+			}
+			tx = (rd(MSDC_FIFOCS) >> 16) & 0xff;
+		}
+		words = (128 - tx) / 4;
+		if (words > left) {
+			words = left;
+		}
+		for (uint32_t i = 0; i < words; i++) {
+			wr(MSDC_TXDATA, *src++);
+		}
+		left -= words;
+	}
+	if (!wait_int(INT_XFER_COMPL, INT_DATTMO | INT_DATCRCERR, "write end")) {
+		return false;
+	}
+	return wait_idle();
+}
+
+static bool
+write_blocks(uint64_t lba, uint32_t blocks, const uint32_t *src)
+{
+	if (blocks == 1) {
+		return write_one_block(lba, src);
+	}
+	if (!wait_idle()) {
+		return false;
+	}
+	pio_mode();
+	wr(SDC_BLK_NUM, blocks);
+	wr(SDC_ARG, (uint32_t)lba);
+	wr(SDC_CMD, 25 | CMD_RSP_R1 | CMD_DTYPE_MULTI | CMD_WRITE | CMD_BLKLEN(512));
+	if (!wait_int(INT_CMDRDY, INT_CMDTMO | INT_RSPCRCERR, "write cmd")) {
+		return false;
+	}
+	for (uint32_t left = blocks * 512 / 4; left;) {
+		uint32_t tx = (rd(MSDC_FIFOCS) >> 16) & 0xff, spin = 0, words;
+
+		while (tx >= 128) {
+			uint32_t status = rd(MSDC_INT);
+
+			if (status & (INT_DATTMO | INT_DATCRCERR)) {
+				wr(MSDC_INT, status);
+				(void)stop();
+				return fail("write data", status);
+			}
+			if (++spin > 20000000) {
+				(void)stop();
+				return fail("write stalled", rd(MSDC_FIFOCS));
+			}
+			tx = (rd(MSDC_FIFOCS) >> 16) & 0xff;
+		}
+		words = (128 - tx) / 4;
+		if (words > left) {
+			words = left;
+		}
+		for (uint32_t i = 0; i < words; i++) {
+			wr(MSDC_TXDATA, *src++);
+		}
+		left -= words;
+	}
+	if (!wait_int(INT_XFER_COMPL, INT_DATTMO | INT_DATCRCERR, "write end")) {
+		(void)stop();
+		return false;
+	}
+	return stop();
+}
+
+static bool
+write_retrying(uint64_t lba, uint32_t blocks, const uint32_t *src)
+{
+	for (uint32_t b = 0; b < blocks; b++) {
+		const uint32_t *p = src + b * (512 / 4);
+		if (write_one_block(lba + b, p)) {
+			continue;
+		}
+		emmc_errors++;
+		printf("emmc: writing block %llu: %s (%#x); trying again\n", lba + b, emmc_failed, emmc_failed_status);
+		pio_mode();
+		(void)stop();
+		if (!write_one_block(lba + b, p)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /* the same, tried again once after a failure (the controller cleared and the card told to stop) */
 static bool
 read_retrying(uint64_t lba, uint32_t blocks, uint32_t *dst)
@@ -207,6 +370,42 @@ read_retrying(uint64_t lba, uint32_t blocks, uint32_t *dst)
 	return read_blocks(lba, blocks, dst);
 }
 
+/* read relative blocks across partition extents into dst (4-aligned) */
+static bool
+read_extent_blocks(uint64_t rel_block, uint32_t count, void *dst)
+{
+	uint8_t *p = (uint8_t *)dst;
+	while (count > 0) {
+		uint64_t b = rel_block;
+		uint64_t cur_lba = 0;
+		uint32_t avail = 0;
+
+		for (uint32_t i = 0; i < emmc_num_exts; i++) {
+			if (b < emmc_exts[i].blocks) {
+				cur_lba = emmc_exts[i].lba + b;
+				uint64_t rem = emmc_exts[i].blocks - b;
+				avail = (rem > 0xffffffffULL) ? 0xffffffffU : (uint32_t)rem;
+				break;
+			}
+			b -= emmc_exts[i].blocks;
+		}
+		if (cur_lba == 0) {
+			return false;
+		}
+		uint32_t chunk = count < avail ? count : avail;
+		if (chunk > EMMC_MAX_BLOCKS) {
+			chunk = EMMC_MAX_BLOCKS;
+		}
+		if (!read_retrying(cur_lba, chunk, (uint32_t *)(void *)p)) {
+			return false;
+		}
+		rel_block += chunk;
+		count -= chunk;
+		p += chunk * 512;
+	}
+	return true;
+}
+
 /* ---- the partition ---- */
 
 static uint32_t sector[128] __attribute__((aligned(16)));
@@ -218,6 +417,12 @@ find_partition(void)
 	const uint8_t *s = (const uint8_t *)sector;
 	uint64_t entries_lba, at;
 	uint32_t count, size;
+
+	emmc_num_exts = 0;
+	emmc_blocks = 0;
+	emmc_lba = 0;
+	data_lba = 0;
+	data_blocks = 0;
 
 	if (!read_retrying(1, 1, sector) || memcmp(s, "EFI PART", 8) != 0) {
 		printf("emmc: no GPT (%s)\n", emmc_failed ? emmc_failed : "no signature");
@@ -235,6 +440,19 @@ find_partition(void)
 		size_t k;
 		uint64_t first, last;
 
+		for (k = 0; EMMC_DATA_PART[k] && e[56 + 2 * k] == (uint8_t)EMMC_DATA_PART[k] && e[57 + 2 * k] == 0; k++) {
+		}
+		if (EMMC_DATA_PART[k] == 0 && e[56 + 2 * k] == 0 && e[57 + 2 * k] == 0) {
+			memcpy(&first, e + 32, 8);
+			memcpy(&last, e + 40, 8);
+			if (first != 0 && last >= first) {
+				data_lba = first;
+				data_blocks = last - first + 1;
+				printf("emmc: " EMMC_DATA_PART " at block %llu (%llu MB)\n",
+				    data_lba, (data_blocks * 512) >> 20);
+			}
+		}
+
 		for (k = 0; EMMC_PART[k] && e[56 + 2 * k] == (uint8_t)EMMC_PART[k] && e[57 + 2 * k] == 0; k++) {
 		}
 		if (EMMC_PART[k] != 0 || e[56 + 2 * k] != 0 || e[57 + 2 * k] != 0) {
@@ -247,7 +465,81 @@ find_partition(void)
 		}
 		emmc_lba = first;
 		emmc_blocks = last - first + 1;
-		break;
+		emmc_exts[0].lba = first;
+		emmc_exts[0].blocks = emmc_blocks;
+		emmc_num_exts = 1;
+	}
+	if (emmc_lba == 0) {
+		/* Not found directly in GPT. Check Android dynamic partitions inside 'super'. */
+		uint64_t super_lba = 0;
+		for (uint32_t i = 0; i < count; i++) {
+			const uint8_t *e = (const uint8_t *)entries + i * size;
+			static const char s_name[] = "super";
+			size_t k;
+			for (k = 0; s_name[k] && e[56 + 2 * k] == (uint8_t)s_name[k] && e[57 + 2 * k] == 0; k++) {
+			}
+			if (s_name[k] == 0 && e[56 + 2 * k] == 0 && e[57 + 2 * k] == 0) {
+				memcpy(&super_lba, e + 32, 8);
+				printf("emmc: found 'super' GPT partition at LBA %llu\n", super_lba);
+				break;
+			}
+		}
+		if (super_lba != 0) {
+			/* Check LP metadata slot 0 (sector 24) or slot 1 (sector 24 + 128) */
+			uint64_t meta_sectors[2] = { super_lba + 24, super_lba + 24 + 128 };
+			for (int slot = 0; slot < 2 && emmc_lba == 0; slot++) {
+				uint64_t sec = meta_sectors[slot];
+				if (!read_retrying(sec, 4, entries)) {
+					continue;
+				}
+				uint32_t *m = entries;
+				if (m[0] != 0x414c5030u) { /* "0PLA" */
+					continue;
+				}
+				uint32_t hsize = m[2];
+				uint32_t p_off = m[20];
+				uint32_t p_num = m[21];
+				uint32_t p_size = m[22];
+				uint32_t e_off = m[23];
+				uint32_t e_num = m[24];
+				uint32_t e_size = m[25];
+				printf("emmc: LP metadata at super+%llu: %u parts, %u extents\n",
+					sec - super_lba, p_num, e_num);
+				const uint8_t *t = (const uint8_t *)entries + hsize;
+				for (uint32_t i = 0; i < p_num; i++) {
+					const uint8_t *p = t + p_off + i * p_size;
+					char pname[37];
+					memcpy(pname, p, 36);
+					pname[36] = 0;
+					uint32_t ext_idx = *(const uint32_t *)(p + 40);
+					uint32_t num_exts = *(const uint32_t *)(p + 44);
+					if (strncmp(pname, EMMC_PART, 36) == 0) {
+						printf("emmc: matched '%s' (%u extents)\n", pname, num_exts);
+						for (uint32_t x = 0; x < num_exts && emmc_num_exts < MAX_EMMC_EXTS; x++) {
+							uint32_t cur_idx = ext_idx + x;
+							if (cur_idx < e_num) {
+								const uint8_t *ext = t + e_off + cur_idx * e_size;
+								uint64_t num_sec, tgt_sec;
+								uint32_t tgt_type;
+								memcpy(&num_sec, ext, 8);
+								memcpy(&tgt_type, ext + 8, 4);
+								memcpy(&tgt_sec, ext + 12, 8);
+								emmc_exts[emmc_num_exts].lba = super_lba + tgt_sec;
+								emmc_exts[emmc_num_exts].blocks = num_sec;
+								emmc_blocks += num_sec;
+								printf("emmc:   ext[%u]: LBA=%llu, cnt=%llu (%llu MB)\n",
+									emmc_num_exts, emmc_exts[emmc_num_exts].lba, num_sec, (num_sec * 512) >> 20);
+								emmc_num_exts++;
+							}
+						}
+						if (emmc_num_exts > 0) {
+							emmc_lba = emmc_exts[0].lba;
+							break;
+						}
+					}
+				}
+			}
+		}
 	}
 	if (emmc_lba == 0) {
 		printf("emmc: no " EMMC_PART " partition\n");
@@ -257,13 +549,22 @@ find_partition(void)
 	for (at = 0; at < emmc_blocks * 512;) {
 		uint32_t bs;
 		uint64_t n;
+		bool rd_ok = read_extent_blocks(at / 512, 1, sector);
 
-		if (!read_retrying(emmc_lba + at / 512, 1, sector) || sector[8] != 0x4253584eu) {   /* "NXSB" */
+		if (!rd_ok) {
+			printf("emmc: read failed at rel block %llu: %s\n", at / 512, emmc_failed ? emmc_failed : "error");
+			break;
+		}
+		if (sector[8] != 0x4253584eu) {   /* "NXSB" */
+			printf("emmc: rel block %llu sector[8]=0x%08x (expected NXSB 0x4253584e), sec[0..3]=%08x %08x %08x %08x\n",
+				at / 512, sector[8], sector[0], sector[1], sector[2], sector[3]);
 			break;
 		}
 		bs = sector[9];
 		memcpy(&n, s + 40, 8);
 		if (bs < 512 || bs > 65536 || n == 0 || n * bs > emmc_blocks * 512 - at) {
+			printf("emmc: invalid bs=%u or n=%llu at rel block %llu (blocks left %llu)\n",
+				bs, n, at / 512, (emmc_blocks * 512 - at) / 512);
 			break;
 		}
 		at += n * bs;
@@ -272,8 +573,8 @@ find_partition(void)
 		printf("emmc: no APFS container in " EMMC_PART " (tools/system-flash.sh writes it)\n");
 		return false;
 	}
-	printf("emmc: " EMMC_PART " at block %llu, %llu MB of %llu MB in its APFS containers\n", emmc_lba, at >> 20,
-	    (emmc_blocks * 512) >> 20);
+	printf("emmc: " EMMC_PART " at block %llu (%u extents), %llu MB of %llu MB in its APFS containers\n",
+		emmc_lba, emmc_num_exts, at >> 20, (emmc_blocks * 512) >> 20);
 	emmc_blocks = at / 512;
 	return true;
 }
@@ -281,9 +582,17 @@ find_partition(void)
 /* ---- the devices ---- */
 
 static int
-emmc_open(__unused dev_t dev, int flags, __unused int devtype, __unused proc_t p)
+emmc_open(dev_t dev, int flags, __unused int devtype, __unused proc_t p)
 {
-	return (flags & FWRITE) ? EROFS : 0;
+	int m = minor(dev);
+
+	if (m == 0) {
+		return (flags & FWRITE) ? EROFS : 0;
+	}
+	if (m == 1 && data_blocks > 0) {
+		return 0;
+	}
+	return ENXIO;
 }
 
 static int
@@ -295,54 +604,101 @@ emmc_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unuse
 static void
 emmc_strategy(buf_t bp)
 {
+	int m = minor(buf_device(bp));
+	bool is_read = (buf_flags(bp) & B_READ) != 0;
+	uint64_t total_blocks = (m == 1) ? data_blocks : emmc_blocks;
 	uint64_t block = (uint64_t)buf_blkno(bp);
 	uint32_t count = buf_count(bp), done = 0;
 	uint8_t *data = (uint8_t *)buf_dataptr(bp);
 	int error = 0;
 
-	if (!(buf_flags(bp) & B_READ)) {
-		error = EROFS;                      /* this device never writes */
+	if (m != 0 && (m != 1 || data_blocks == 0)) {
+		error = ENXIO;
 		goto out;
 	}
-	if (block >= emmc_blocks) {
+	if (!is_read && m == 0) {
+		error = EROFS;                      /* minor 0 (xnusys) never writes */
+		goto out;
+	}
+	if (block >= total_blocks) {
 		buf_setresid(bp, count);
-		error = block == emmc_blocks ? 0 : EINVAL;
+		error = block == total_blocks ? 0 : EINVAL;
 		goto out;
 	}
-	if (count > (emmc_blocks - block) * 512) {
-		count = (uint32_t)((emmc_blocks - block) * 512);
+	if (count > (total_blocks - block) * 512) {
+		count = (uint32_t)((total_blocks - block) * 512);
 	}
 	lck_mtx_lock(&emmc_lock);
 	while (done < count && error == 0) {
 		uint32_t blocks = (count - done) / 512;
+		uint64_t rel_blk = block + done / 512;
 
 		if (blocks == 0 || ((uintptr_t)(data + done) & 3)) {
 			/* a part block, or a buffer not 4-aligned: one block at a time through the sector buffer */
 			uint32_t n = count - done < 512 ? count - done : 512;
 
-			if (!read_retrying(emmc_lba + block + done / 512, 1, sector)) {
-				error = EIO;
-				break;
+			if (m == 0) {
+				if (!read_extent_blocks(rel_blk, 1, sector)) {
+					error = EIO;
+					break;
+				}
+				memcpy(data + done, sector, n);
+			} else if (is_read) {
+				if (!read_retrying(data_lba + rel_blk, 1, sector)) {
+					error = EIO;
+					break;
+				}
+				memcpy(data + done, sector, n);
+				emmc_reads++;
+				emmc_read_blocks++;
+			} else {
+				if (n < 512 && !read_retrying(data_lba + rel_blk, 1, sector)) {
+					error = EIO;
+					break;
+				}
+				memcpy(sector, data + done, n);
+				if (!write_retrying(data_lba + rel_blk, 1, sector)) {
+					error = EIO;
+					break;
+				}
+				emmc_writes++;
+				emmc_write_blocks++;
 			}
-			memcpy(data + done, sector, n);
 			done += n;
 			continue;
 		}
 		if (blocks > EMMC_MAX_BLOCKS) {
 			blocks = EMMC_MAX_BLOCKS;
 		}
-		if (!read_retrying(emmc_lba + block + done / 512, blocks, (uint32_t *)(void *)(data + done))) {
-			error = EIO;
-			break;
+		if (m == 0) {
+			if (!read_extent_blocks(rel_blk, blocks, (uint32_t *)(void *)(data + done))) {
+				error = EIO;
+				break;
+			}
+			emmc_reads++;
+			emmc_read_blocks += blocks;
+		} else if (is_read) {
+			if (!read_retrying(data_lba + rel_blk, blocks, (uint32_t *)(void *)(data + done))) {
+				error = EIO;
+				break;
+			}
+			emmc_reads++;
+			emmc_read_blocks += blocks;
+		} else {
+			if (!write_retrying(data_lba + rel_blk, blocks, (const uint32_t *)(const void *)(data + done))) {
+				error = EIO;
+				break;
+			}
+			emmc_writes++;
+			emmc_write_blocks += blocks;
 		}
-		emmc_reads++;
-		emmc_read_blocks += blocks;
 		done += blocks * 512;
 	}
 	lck_mtx_unlock(&emmc_lock);
 	buf_setresid(bp, buf_count(bp) - done);
 	if (error) {
-		printf("emmc: block %llu, %u bytes: %s (%#x)\n", block, count, emmc_failed, emmc_failed_status);
+		printf("emmc: minor %d %s block %llu, %u bytes: %s (%#x)\n",
+		    m, is_read ? "read" : "write", block, count, emmc_failed, emmc_failed_status);
 	}
 out:
 	if (error) {
@@ -352,8 +708,10 @@ out:
 }
 
 static int
-emmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int fflag, __unused proc_t p)
+emmc_ioctl(dev_t dev, u_long cmd, caddr_t data, __unused int fflag, __unused proc_t p)
 {
+	int m = minor(dev);
+
 	switch (cmd) {
 	case DKIOCGETBLOCKSIZE:
 		*(uint32_t *)data = 512;
@@ -362,12 +720,15 @@ emmc_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int fflag, __u
 		/* (spec_open sets 512 and back again, and takes a refusal for a broken device) */
 		return *(uint32_t *)data == 512 ? 0 : EINVAL;
 	case DKIOCGETBLOCKCOUNT:
-		*(uint64_t *)data = emmc_blocks;
+		*(uint64_t *)data = (m == 1) ? data_blocks : emmc_blocks;
 		return 0;
 	case DKIOCISWRITABLE:
-		*(uint32_t *)data = 0;
+		*(uint32_t *)data = (m == 1 && data_blocks > 0) ? 1 : 0;
 		return 0;
 	case DKIOCGETMAXBLOCKCOUNTREAD:
+		*(uint64_t *)data = EMMC_MAX_BLOCKS;
+		return 0;
+	case DKIOCGETMAXBLOCKCOUNTWRITE:
 		*(uint64_t *)data = EMMC_MAX_BLOCKS;
 		return 0;
 	default:
@@ -387,6 +748,15 @@ emmc_read(dev_t dev, struct uio *uio, __unused int ioflag)
 	return physio(emmc_strategy, NULL, dev, B_READ, (u_int (*)(buf_t))emmc_size, uio, 512);
 }
 
+static int
+emmc_write(dev_t dev, struct uio *uio, __unused int ioflag)
+{
+	if (minor(dev) != 1 || data_blocks == 0) {
+		return EROFS;
+	}
+	return physio(emmc_strategy, NULL, dev, B_WRITE, (u_int (*)(buf_t))emmc_size, uio, 512);
+}
+
 static const struct bdevsw emmc_bdevsw = {
 	.d_open     = emmc_open,
 	.d_close    = emmc_close,
@@ -401,7 +771,7 @@ static const struct cdevsw emmc_cdevsw = {
 	.d_open       = emmc_open,
 	.d_close      = emmc_close,
 	.d_read       = emmc_read,
-	.d_write      = eno_rdwrt,
+	.d_write      = emmc_write,
 	.d_ioctl      = emmc_ioctl,
 	.d_stop       = eno_stop,
 	.d_reset      = eno_reset,
@@ -432,7 +802,7 @@ redwood_emmc_root(dev_t *root)
 	probe = kalloc_data(EMMC_MAX_BLOCKS * 512, Z_WAITOK);
 	if (probe != NULL) {
 		for (uint32_t at = 0; at < 4 * 2048 && at + EMMC_MAX_BLOCKS <= emmc_blocks; at += EMMC_MAX_BLOCKS) {
-			if (!read_retrying(emmc_lba + at, EMMC_MAX_BLOCKS, probe)) {
+			if (!read_extent_blocks(at, EMMC_MAX_BLOCKS, probe)) {
 				break;
 			}
 		}
@@ -459,16 +829,23 @@ redwood_emmc_devfs(void)
 	    devfs_make_node(makedev(emmc_cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "remmc0") == NULL) {
 		printf("emmc: no /dev nodes\n");
 	}
+	if (data_blocks > 0) {
+		if (devfs_make_node(makedev(emmc_bmajor, 1), DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0660, "emmc1") == NULL ||
+		    devfs_make_node(makedev(emmc_cmajor, 1), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0660, "remmc1") == NULL) {
+			printf("emmc: no /dev/emmc1 nodes\n");
+		}
+	}
 }
 
-/* sysctl kern.redwood.emmc: how much it has read, and its errors */
+/* sysctl kern.hakios.emmc: how much it has read/written, and its errors */
 static int
 emmc_sysctl SYSCTL_HANDLER_ARGS
 {
 #pragma unused(oidp, arg1, arg2)
-	char line[160];
+	char line[192];
 
-	snprintf(line, sizeof(line), "emmc: %llu reads, %llu MB, %llu errors%s%s", emmc_reads, emmc_read_blocks >> 11,
+	snprintf(line, sizeof(line), "emmc: %llu reads (%llu MB), %llu writes (%llu MB), %llu errors%s%s",
+	    emmc_reads, emmc_read_blocks >> 11, emmc_writes, emmc_write_blocks >> 11,
 	    emmc_errors, emmc_failed ? "; last: " : "", emmc_failed ? emmc_failed : "");
 	return SYSCTL_OUT(req, line, strlen(line) + 1);
 }

@@ -11,7 +11,8 @@ The phone loses nothing. `mtkloader` installs into `boot_a` ahead of the Android
 and after the session the phone returns to Android by itself. The iOS system image lives in its own `xnusys` partition and is read from
 eMMC on demand. A research bench, not a ROM.
 
-**Documentation:** [docs/](docs/README.md); porting to another MediaTek phone: [docs/mtk-porting.md](docs/mtk-porting.md).
+**Documentation:** [docs/](docs/README.md); porting to another MediaTek phone: [docs/mtk-porting.md](docs/mtk-porting.md).  
+**Xiaomi Redmi Note 9 (`merlinx`):** [Install guide](docs/merlinx-install.md) | [Bring-up notes](docs/merlinx-bringup-notes.md) | [Installer script](tools/install-merlinx.sh)
 
 ## What works
 

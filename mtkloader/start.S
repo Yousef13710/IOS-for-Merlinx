@@ -11,6 +11,8 @@
 .global psci_system_reset
 .global psci_cpu_on
 .global watcher_entry
+.global xnu_cpu_on_trampoline
+.global xnu_cpu_on_entry_pa
 .global mmu_on
 .global dcache_clean_range
 .global irq_wait
@@ -218,6 +220,27 @@ watcher_entry:
     bl      watcher_main
 1:  wfe
     b       1b
+
+/* Low-DRAM (< 0x80000000) trampoline for PSCI_CPU_ON on MT6768 ATF, entering LowResetVectorBase at EL1h. */
+xnu_cpu_on_trampoline:
+    msr     daifset, #0xf
+    cbnz    x0, 1f
+    adr     x9, xnu_cpu_on_entry_pa
+    ldr     x0, [x9]
+1:  mrs     x2, CurrentEL
+    lsr     x2, x2, #2
+    cmp     x2, #2
+    b.ne    2f
+    mov     x2, #(1 << 31)      /* HCR_EL2.RW: EL1 is AArch64 */
+    msr     hcr_el2, x2
+    mov     x2, #0x3c5          /* EL1h, DAIF masked */
+    msr     spsr_el2, x2
+    msr     elr_el2, x0
+    eret
+2:  br      x0
+    .balign 8
+xnu_cpu_on_entry_pa:
+    .quad   0
 
 /*
  * mmu_on(l1_table_pa): 4K granule, 39-bit addresses from one level-1 table of 1 GB blocks,
