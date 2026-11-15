@@ -79,7 +79,7 @@ cd hakios
 cd hakios/userland
 GL=1 WIFID=1 RC=rc.launchd.aks \
   MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd" \
-  OSLOG="com.apple.backboardd com.apple.bluetoothd com.apple.Preferences" \
+  OSLOG="" \
   bash build.sh
 ```
 This builds **both**:

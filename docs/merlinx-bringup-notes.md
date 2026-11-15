@@ -14,8 +14,9 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
 - **Double-buffered tear-free page flipping (`fb_flip=1`):**
   - `FLIP_LK_FB_BASE = 0x7cdb0000ULL`, `FLIP_LK_FB_SIZE = 0x017e8000ULL` in `xnu/files/iokit/Kernel/MiniIOMobileFramebuffer.cpp` (matching `mtkloader/mtkdbg.h`).
   - **Fix for `KERN_NO_SPACE` panic (`kmem_alloc(0x9b8000): failed with 3`):** `ml_io_map_wcomb()` allocates from `io_submap` which is only 8 MB (`IO_MAP_SIZE = 8ul << 20` in `osfmk/arm/io_map.c`), while `merlinx`'s 1080x2340x32 framebuffer (`picture = 4352 * 2340 = 0x9b8000`, ~9.7 MB) exceeds 8 MB. Switched `flipStart()` to `ml_io_map_unmappable(scanned + picture, (vm_size_t) picture, VM_WIMG_WCOMB)` (allocates from `kernel_map`). Verified zero tearing and no panic.
-- **VSync pacing (`fb_beat=0`) & blur (`vblur=0`):**
+- **VSync pacing (`fb_beat=0`), blur (`vblur=0`), & Mesa Panfrost (`-O3` + shader cache):**
   - `fb_beat=1` slept `9.2–12.7 ms` per frame waiting on a software beat, dropping animations to 14–32 fps. Setting `fb_beat=0` + `vblur=0` (skipping heavy variable-radius blur passes in `eagl.c`) + tightening `wait_job()` sleep-poll in `xnu/files/bsd/dev/redwood_mali.c` from `200 us` to `100 us` noticeably improved UI & animation responsiveness.
+  - Rebuilt Mesa Panfrost (`tools/mk-mesa.sh`) with `-Doptimization=3` (instead of `-Os`) and `-Dshader-cache=enabled` (with `tools/mesa/panfrost-disk-cache-darwin.patch` and `MESA_SHADER_CACHE_DIR=/private/var/tmp/mesa_cache` in `userland/src/eagl.c`), and built userland with `OSLOG=""`.
 - **CPU & GPU Clocks (`-DXNU_CORES=8`, `cpus=8 small_cores_after=0 mtk_cpufreq=3 mali=1 mali_mhz=1050`):**
   - Verified A75 big cores at `2000 MHz` and A55 little cores at `1700 MHz`.
   - Updated `gpu_raise()` in `xnu/files/bsd/dev/redwood_mtkkeys.c` to allow `mali_mhz` up to `1150` using `/2` `GPUPLL` post-divider above `950 MHz` (`1050 MHz` at `VGPU = 1000 mV`, `VSRAM_GPU = 1100 mV`).
@@ -69,7 +70,7 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
 ```sh
 # Userland
 cd /home/devnull/IOS/hakios/userland
-GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd" OSLOG="com.apple.backboardd com.apple.bluetoothd com.apple.Preferences" bash build.sh
+GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd" OSLOG="" bash build.sh
 
 # Kernel (sync xnu/files/* into xnu-src/xnu-8796.121.2/ if modified)
 cd /home/devnull/IOS/hakios && ./xnu-build.sh -j8 -k
