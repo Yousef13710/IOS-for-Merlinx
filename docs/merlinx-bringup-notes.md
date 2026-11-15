@@ -17,6 +17,8 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
 - **VSync pacing (`fb_beat=0`), blur (`vblur=0`), & Mesa Panfrost (`-O3` + shader cache):**
   - `fb_beat=1` slept `9.2–12.7 ms` per frame waiting on a software beat, dropping animations to 14–32 fps. Setting `fb_beat=0` + `vblur=0` (skipping heavy variable-radius blur passes in `eagl.c`) + tightening `wait_job()` sleep-poll in `xnu/files/bsd/dev/redwood_mali.c` from `200 us` to `100 us` noticeably improved UI & animation responsiveness.
   - Rebuilt Mesa Panfrost (`tools/mk-mesa.sh`) with `-Doptimization=3` (instead of `-Os`) and `-Dshader-cache=enabled` (with `tools/mesa/panfrost-disk-cache-darwin.patch` and `MESA_SHADER_CACHE_DIR=/private/var/tmp/mesa_cache` in `userland/src/eagl.c`), and built userland with `OSLOG=""`.
+- **Big-core `backboardd` render thread (`userland/src/eagl.c`):**
+  - Pinned `backboardd`'s OpenGL/Panfrost render thread to Cortex-A75 big core `1` (`kern.redwood.bind_cpu = 1`), cutting CPU frame time roughly in half (heavy ~170-draw animations improved from `22–35 ms` / `15–32 FPS` to `11–15 ms` / `45–56 FPS`, medium ~120-draw scenes up to `60.6 FPS`).
 - **CPU & GPU Clocks (`-DXNU_CORES=8`, `cpus=8 small_cores_after=0 mtk_cpufreq=3 mali=1 mali_mhz=1050`):**
   - Verified A75 big cores at `2000 MHz` and A55 little cores at `1700 MHz`.
   - Updated `gpu_raise()` in `xnu/files/bsd/dev/redwood_mtkkeys.c` to allow `mali_mhz` up to `1150` using `/2` `GPUPLL` post-divider above `950 MHz` (`1050 MHz` at `VGPU = 1000 mV`, `VSRAM_GPU = 1100 mV`).

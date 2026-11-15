@@ -1077,6 +1077,17 @@ frame_end(struct eagl *e, bool finished)
 	after = now_us();
 	e->in_frame = false;
 	e->frames++;
+	{
+		static __thread int big_bound = 0;
+		if (!big_bound) {
+			big_bound = 1;
+			const char *pn = getprogname();
+			if (pn != NULL && strcmp(pn, "backboardd") == 0) {
+				int big_cpu = 1;
+				(void)sysctlbyname("kern.redwood.bind_cpu", NULL, NULL, &big_cpu, sizeof(big_cpu));
+			}
+		}
+	}
 	if (latency_lines) {
 		/* "tl: g FRAME began US ended US DRAWS": microseconds of mach_absolute_time (tools/latency.py) */
 		say("tl: g %u began %llu ended %llu %u\n", e->frames, e->began, after, e->draws);
