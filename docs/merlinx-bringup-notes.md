@@ -16,8 +16,9 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
   - **Fix for `KERN_NO_SPACE` panic (`kmem_alloc(0x9b8000): failed with 3`):** `ml_io_map_wcomb()` allocates from `io_submap` which is only 8 MB (`IO_MAP_SIZE = 8ul << 20` in `osfmk/arm/io_map.c`), while `merlinx`'s 1080x2340x32 framebuffer (`picture = 4352 * 2340 = 0x9b8000`, ~9.7 MB) exceeds 8 MB. Switched `flipStart()` to `ml_io_map_unmappable(scanned + picture, (vm_size_t) picture, VM_WIMG_WCOMB)` (allocates from `kernel_map`). Verified zero tearing and no panic.
 - **VSync pacing (`fb_beat=1` vs `fb_beat=0`):**
   - `fb_beat=0` dropped busy frames within 18 ms from `62%` to `37%` because unpaced submission saturated Mesa Panfrost (`redwood-gl`). Keep `fb_beat=1` (default).
-- **CPU & GPU Clocks (`-DXNU_CORES=8`, `cpus=8 small_cores_after=0 mtk_cpufreq=3 mali=1 mali_mhz=950`):**
+- **CPU & GPU Clocks (`-DXNU_CORES=8`, `cpus=8 small_cores_after=0 mtk_cpufreq=3 mali=1 mali_mhz=1050`):**
   - Verified A75 big cores at `2000 MHz` and A55 little cores at `1700 MHz`.
+  - Updated `gpu_raise()` in `xnu/files/bsd/dev/redwood_mtkkeys.c` to allow `mali_mhz` up to `1150` using `/2` `GPUPLL` post-divider above `950 MHz` (`1050 MHz` at `VGPU = 1000 mV`, `VSRAM_GPU = 1100 mV`).
 
 ## 3. AKS / Keybagd (`rc.launchd.aks`)
 - **Fix for `/redwood/bin/tolog: No such file or directory`:** Built and copied `obj/tolog` unconditionally in `userland/build.sh` (previously gated on `METAL=1`). Fixed `aks_restore` and `keybagd --init` (`-25291` Identity Root error).
@@ -58,7 +59,7 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
   - Deferred `ext2_sync_node`/`ext2_flush_meta` in `ext2_write` (only on `IO_SYNC`, `fsync`, `sync`, `inactive`, `reclaim`, `unmount`) and `ext2_pageout`.
   - Fixed `ext2_vget_locked()` `em_lock` race condition, added 32 MB (`8192`-block) write-back cache, 128 KB `ext2_bcache_flush_run` coalescing, `bc_ino` per-inode `fsync`, 32 KB `em_ra_buf` read-ahead, and `em_grp_hint` O(1) block allocator.
   - Dynamically allocated `em_bcache_hash` (`Z_WAITOK | Z_ZERO`), `em_io_buf` (128 KB), `em_ra_buf` (32 KB), `em_grp_hint`, and `em_bmap_buf` via `kalloc_data` to avoid `KALLOC_SAFE_ALLOC_SIZE` + `Z_NOFAIL` early-boot panics.
-  - Verified on device: boots in ~5 min (down from ~30 min), smooth UI, un-chopped icons (`Settings → General → About` still crashes in `Preferences`).
+  - Verified on device: boots in **~2.5–3 min** (`~2 min 40 s` measured, down from ~30 min), un-chopped icons; currently no wallpaper, laggy UI/apps, and `Settings → General → About` crashes in `Preferences`.
 - **Userland (`userland/src/init.c`):**
   - `mount_writable()` mounts `/dev/emmc1` (`ext2`) on `/private/var` (falling back to `ramfs`, or `no_ext2=1` boot-arg to force `ramfs`), treats `EEXIST` on `mkdir` as success, and skips overwriting existing files.
 - **Bootloader (`mtkloader/mtkloader.c`):**
@@ -75,7 +76,7 @@ cd /home/devnull/IOS/hakios && ./xnu-build.sh -j8 -k
 
 # Payload, mtkloader, boot.img
 python3 /home/devnull/IOS/hakios/xnuloader/mkpayload.py -o /home/devnull/IOS/hakios/payload.bin kernel=/home/devnull/IOS/hakios/xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837 loader=/home/devnull/IOS/working-safe/images/loader.efi ramdisk=/home/devnull/IOS/hakios/userland/root.apfs
-bash /home/devnull/IOS/hakios/mtkloader/build.sh -DXNU_CORES=8 -DXNU_VERBOSE=0 -D'XNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 mali=1 mali_mhz=950 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1"'
+bash /home/devnull/IOS/hakios/mtkloader/build.sh -DXNU_CORES=8 -DXNU_VERBOSE=0 -D'XNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 mali=1 mali_mhz=1050 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1"'
 python3 /home/devnull/IOS/hakios/tools/chainboot.py /home/devnull/IOS/working-safe/images/boot_shas_oc_ksu.img /home/devnull/IOS/hakios/mtkloader/mtkloader.bin /home/devnull/IOS/hakios/boot.img /home/devnull/IOS/hakios/payload.bin
 
 # Install onto merlinx in TWRP

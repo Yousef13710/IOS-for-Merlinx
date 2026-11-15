@@ -251,12 +251,12 @@ gpu_raise(uint32_t mhz)
 	redwood_keep("gpufreq: mux %u, GPUPLL CON0 %#x CON1 %#x PWR %#x, VGPU step %u (%u mV), VSRAM_GPU step %u (%u mV)",
 	    mux, rd(apmixed, GPUPLL_CON0), rd(apmixed, GPUPLL_CON1), rd(apmixed, GPUPLL_PWR_CON0), vgpu,
 	    500 + vgpu * 25 / 4, vsram, 500 + vsram * 25 / 4);
-	if (mhz < 375 || mhz > 950 || mux != 2 || vgpu < 8 || vgpu > 56 || !redwood_mali_ready()) {
+	if (mhz < 375 || mhz > 1150 || mux != 2 || vgpu < 8 || vgpu > 56 || !redwood_mali_ready()) {
 		redwood_keep("gpufreq: not as redwood_mali.c leaves it, or no clock asked for; left as it is");
 		return;
 	}
-	/* MediaTek's voltages, two steps over: 0.78 V at 796 MHz, 0.90 at 950 */
-	uint32_t want_mv = mhz >= 900 ? 913 : mhz >= 800 ? 800 : mhz >= 700 ? 760 : 725;
+	/* MediaTek's voltages, two steps over: 0.78 V at 796 MHz, 0.90 at 950, up to 1.00 V for 1050+ */
+	uint32_t want_mv = mhz >= 1050 ? 1000 : mhz >= 1000 ? 963 : mhz >= 900 ? 913 : mhz >= 800 ? 800 : mhz >= 700 ? 760 : 725;
 	uint32_t want = (want_mv - 500) * 4 / 25, want_sram = want + 16;   /* VSRAM 100 mV over */
 
 	if (want_sram < 56) {
@@ -279,9 +279,11 @@ gpu_raise(uint32_t mhz)
 		wr(apmixed, GPUPLL_PWR_CON0, rd(apmixed, GPUPLL_PWR_CON0) & ~2u);
 		delay(1);
 	}
-	uint32_t dds = ((((mhz * 10) * 4) << 14) / 26 + 5) / 10;
+	uint32_t postdiv = mhz > 950 ? 2 : 4;
+	uint32_t postdiv_bits = mhz > 950 ? 1u : 2u;
+	uint32_t dds = ((((mhz * 10) * postdiv) << 14) / 26 + 5) / 10;
 
-	wr(apmixed, GPUPLL_CON1, 0x80000000u | (2u << 24) | (dds & 0x3fffff));
+	wr(apmixed, GPUPLL_CON1, 0x80000000u | (postdiv_bits << 24) | (dds & 0x3fffff));
 	if (!(rd(apmixed, GPUPLL_CON0) & 1)) {
 		wr(apmixed, GPUPLL_CON0, rd(apmixed, GPUPLL_CON0) | 1);
 	}

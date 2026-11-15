@@ -10,14 +10,15 @@ Complete guide to building and installing HakiOS (XNU 8796.121.2 / iOS 16.5) on 
 ## 1. Current Status (`merlinx`)
 
 - **Works:**
-  - 8-core SMP (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1700 MHz), Mali-G52 @ 950 MHz (`GL=1` / Mesa Panfrost), tear-free double-buffered display (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1`).
+  - 8-core SMP (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1700 MHz), Mali-G52 @ 1050 MHz (`GL=1` / Mesa Panfrost, `mali_mhz=1050`), tear-free double-buffered display (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1`).
   - Touchscreen (`redwood_nvt.c`), power & volume buttons (`buttons=2`), battery gauge (`mtkbatt=1`).
   - Bluetooth (`connsys_bt=2`, `bluetoothd`, `BlueTool` — Settings → Bluetooth works and stays on).
   - Wi-Fi scanning/network discovery (`connsys_step=17`, `WIFID=1`).
   - Rear camera (`s5kgm1sp`, `mtkcam_skel=1`, live preview in `Camera.app`, currently laggy/tearing).
-  - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, ~51.9 GiB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (~5 min first boot; smooth UI, un-chopped icons, widgets).
+  - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, ~51.9 GiB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (**~2.5–3 min boot** [`~2 min 40 s` measured]; un-chopped icons, widgets).
   - Optional RAM-only `/private/var` mode (`no_ext2=1` boot-arg, ~2 min boot, non-persistent).
 - **Known Limitations:**
+  - **Laggy UI / apps** and **no wallpaper** currently.
   - **Wi-Fi:** Discovers nearby networks, but **does not connect/associate** yet.
   - **`Settings → General → About`:** Currently crashes `Preferences`.
   - **Not ported / unsupported:** Front camera, speakers/mic audio, cellular/baseband, `ext4` (use `ext2` for `iosdata`), and Apple online services (iCloud/App Store/activation).
@@ -96,7 +97,7 @@ python3 xnuloader/mkpayload.py \
 
 bash mtkloader/build.sh \
   -DXNU_CORES=8 -DXNU_VERBOSE=0 \
-  -D'XNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 mali=1 mali_mhz=950 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1"'
+  -D'XNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 mali=1 mali_mhz=1050 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1"'
 
 python3 tools/chainboot.py \
   stock_boot.img \

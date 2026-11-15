@@ -9,8 +9,8 @@ Unlike the temporary dual-boot `Infinix Hot 20` setup, this `merlinx` port repla
 ## What works on `merlinx`
 
 - **Boot & SMP** — `mtkloader` on MT6768 (MMU off, eMMC over MSDC0, XNU DT); all **8 cores** (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1700 MHz via `mtk_cpufreq=3`).
-- **Persistent Storage (`ext2`)** — Read-only iOS 16.5 `system.apfs` on `xnusys` (`/dev/emmc0`, 4.0 GiB) + persistent read-write `/private/var` on **`ext2`** (`iosdata`, `/dev/emmc1`, ~51.9 GiB) via XNU's custom `ext2` VFS driver (`bsd/miscfs/ext2/ext2.c`) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (~5 min boot, smooth UI, un-chopped icons; `no_ext2=1` boot-arg enables RAM-only `/private/var`). Note: `ext4` is not supported — `iosdata` uses `ext2`.
-- **Graphics & Display** — In-kernel Mali-G52 driver (`bsd/dev/redwood_mali.c`, 950 MHz), Mesa **panfrost**, and Metal (`userland/src/redwoodmetal.m`), with tear-free double-buffered page flipping (`fb_flip=1`, `fbscale=2 fbfit=1 fb_threads=4`).
+- **Persistent Storage (`ext2`)** — Read-only iOS 16.5 `system.apfs` on `xnusys` (`/dev/emmc0`, 4.0 GiB) + persistent read-write `/private/var` on **`ext2`** (`iosdata`, `/dev/emmc1`, ~51.9 GiB) via XNU's custom `ext2` VFS driver (`bsd/miscfs/ext2/ext2.c`) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (**~2.5–3 min boot** [`~2 min 40 s` measured], un-chopped icons; `no_ext2=1` boot-arg enables RAM-only `/private/var`). Note: `ext4` is not supported — `iosdata` uses `ext2`.
+- **Graphics & Display** — In-kernel Mali-G52 driver (`bsd/dev/redwood_mali.c`, **1050 MHz** OC via `mali_mhz=1050`), Mesa **panfrost**, and Metal (`userland/src/redwoodmetal.m`), with tear-free double-buffered page flipping (`fb_flip=1`, `fbscale=2 fbfit=1 fb_threads=4`).
 - **Input** — Novatek touchscreen (`bsd/dev/redwood_nvt.c`, `touchscreen=3`), power and volume buttons (`buttons=2`, `bsd/dev/redwood_mtkkeys.c`).
 - **Wi-Fi** — CONNSYS brought up (`connsys_step=17`, `WIFID=1`): **discovers/scans nearby Wi-Fi networks, but does not connect/associate yet**.
 - **Bluetooth** — `connsys_bt=2`, `bluetoothd`, `BlueTool`, `nanoregistryd`/`nanoprefsyncd`: Settings → Bluetooth opens, stays on, and scans BLE devices.
@@ -19,6 +19,7 @@ Unlike the temporary dual-boot `Infinix Hot 20` setup, this `merlinx` port repla
 - **Apps & Shell** — Settings, Clock, Calendar, Photos, Notes, Camera, widgets, SSH by key.
 
 **Known limitations / not yet working:**
+- **Laggy UI / apps** and **no wallpaper** currently
 - **Wi-Fi association** (scans/discovers networks, does not connect yet)
 - **`Settings → General → About`** crashes `Preferences`
 - **Not ported / unsupported:** front camera, speakers/mic audio, cellular/baseband, `ext4` (`iosdata` is `ext2`), and Apple online services (activation, Apple ID, iCloud, App Store — no Secure Enclave).
