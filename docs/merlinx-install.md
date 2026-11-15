@@ -54,7 +54,14 @@ All bootloader, TEE, modem/NV, and firmware partitions (`preloader`, `lk`, `tee`
 
 ## 4. Building from Source
 
-### A. Sync XNU files & build the kernel
+### A. Fetch iOS 16.5 (20F66) from Apple's IPSW
+```bash
+cd hakios
+./ios165/fetch.sh
+```
+This downloads and extracts the iOS 16.5 rootfs, cryptexes, and `dyld_shared_cache` into `ios165/` (resumable if interrupted).
+
+### B. Sync XNU files & build the kernel
 > [!IMPORTANT]
 > `xnu/files/...` are copied (not symlinked) into `xnu-src/xnu-8796.121.2/`. Whenever you edit files under `xnu/files/`, copy them into `xnu-src/xnu-8796.121.2/` (or run `./xnu/apply.sh`) before building.
 
@@ -64,7 +71,7 @@ cd hakios
 ./xnu-build.sh -j8 -k
 ```
 
-### B. Build userland (`root.apfs`)
+### C. Build userland (`root.apfs` + `system.apfs` for `xnusys`)
 ```bash
 cd hakios/userland
 GL=1 WIFID=1 RC=rc.launchd.aks \
@@ -72,8 +79,11 @@ GL=1 WIFID=1 RC=rc.launchd.aks \
   OSLOG="com.apple.backboardd com.apple.bluetoothd com.apple.Preferences" \
   bash build.sh
 ```
+This builds **both**:
+- `userland/root.apfs` (init, launchd jobs, shims — embedded in `boot.img`)
+- `userland/system.apfs` (the 4 GiB-compatible APFS iOS system image to flash to `xnusys`)
 
-### C. Build `payload.bin`, `mtkloader.bin`, and `boot-step7-storage.img`
+### D. Build `payload.bin`, `mtkloader.bin`, and `boot-step7-storage.img`
 ```bash
 cd hakios
 python3 xnuloader/mkpayload.py \
@@ -94,13 +104,6 @@ python3 tools/chainboot.py \
 ```
 *(To build a RAM-only `/private/var` image for faster ~2 min non-persistent boots, add `no_ext2=1` to `XNU_EXTRA_ARGS`.)*
 
-### D. Build `xnusys` (`packfs`) from your IPSW
-```bash
-cd hakios
-./ios165/fetch.sh
-python3 mkpackfs.py ... -o xnusys.img
-```
-
 ---
 
 ## 5. Installing onto `merlinx` (via TWRP)
@@ -112,7 +115,7 @@ Boot the phone into **TWRP**, connect USB, and run `tools/install-merlinx.sh`:
 bash tools/install-merlinx.sh \
   --repartition \
   --format-iosdata \
-  --xnusys /path/to/xnusys.img \
+  --xnusys userland/system.apfs \
   --boot boot-step7-storage.img \
   --reboot
 ```
