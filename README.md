@@ -1,65 +1,48 @@
-# HakiOS · MediaTek Helio (Infinix Hot 20)
+# iOS for `merlinx` (Xiaomi Redmi Note 9 · HakiOS / XNU)
 
-English · [Русский](README.ru.md)
+**Apple's open-source Darwin kernel (XNU, `xnu-8796.121.2` — the iOS 16.5 kernel) ported to the Xiaomi Redmi Note 9 (`merlinx`, MediaTek Helio G85 MT6768, 3 GB RAM, 64 GB eMMC)**, based on [HakiOS](https://github.com/oosexgang/hakios-xnu-kernel). On top of XNU runs an unmodified iOS 16.5 user space: `launchd` → `backboardd` → `SpringBoard` → apps.
 
-**Apple's open-source Darwin kernel (XNU, xnu-8796.121.2 — the iOS 16.5 kernel) on a MediaTek phone**, the way Android is Linux on
-phones: a boot loader of its own, drivers of its own, a configuration system and a version of its own. The example device of this
-branch (`mtk`) is the **Infinix Hot 20 (X6826B) — MediaTek Helio G85 (MT6768), Mali-G52 MC2 GPU**. On top of it runs an unmodified
-iOS 16.5 user space: launchd → backboardd → SpringBoard → apps.
+Unlike the temporary dual-boot `Infinix Hot 20` setup, this `merlinx` port replaces Android's `super`/`cache`/`userdata` with a 4.0 GiB `xnusys` system partition and a ~51.9 GiB persistent **`ext2`** `iosdata` partition mounted read-write at `/private/var`, while keeping **TWRP** in `recovery` for root ADB access and `pstore` logs.
 
-The phone loses nothing. `mtkloader` installs into `boot_a` ahead of the Android kernel; on a command from Android it starts XNU once,
-and after the session the phone returns to Android by itself. The iOS system image lives in its own `xnusys` partition and is read from
-eMMC on demand. A research bench, not a ROM.
+**Quick Links:** [Install Guide](docs/merlinx-install.md) | [Bring-up & Technical Notes](docs/merlinx-bringup-notes.md) | [TWRP Installer (`tools/install-merlinx.sh`)](tools/install-merlinx.sh) | [Upstream Docs](docs/README.md)
 
-**Documentation:** [docs/](docs/README.md); porting to another MediaTek phone: [docs/mtk-porting.md](docs/mtk-porting.md).  
-**Xiaomi Redmi Note 9 (`merlinx`):** [Install guide](docs/merlinx-install.md) | [Bring-up notes](docs/merlinx-bringup-notes.md) | [Installer script](tools/install-merlinx.sh)
+## What works on `merlinx`
 
-## What works
+- **Boot & SMP** — `mtkloader` on MT6768 (MMU off, eMMC over MSDC0, XNU DT); all **8 cores** (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1700 MHz via `mtk_cpufreq=3`).
+- **Persistent Storage (`ext2`)** — Read-only iOS 16.5 `system.apfs` on `xnusys` (`/dev/emmc0`, 4.0 GiB) + persistent read-write `/private/var` on **`ext2`** (`iosdata`, `/dev/emmc1`, ~51.9 GiB) via XNU's custom `ext2` VFS driver (`bsd/miscfs/ext2/ext2.c`) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (~5 min boot, smooth UI, un-chopped icons; `no_ext2=1` boot-arg enables RAM-only `/private/var`). Note: `ext4` is not supported — `iosdata` uses `ext2`.
+- **Graphics & Display** — In-kernel Mali-G52 driver (`bsd/dev/redwood_mali.c`, 950 MHz), Mesa **panfrost**, and Metal (`userland/src/redwoodmetal.m`), with tear-free double-buffered page flipping (`fb_flip=1`, `fbscale=2 fbfit=1 fb_threads=4`).
+- **Input** — Novatek touchscreen (`bsd/dev/redwood_nvt.c`, `touchscreen=3`), power and volume buttons (`buttons=2`, `bsd/dev/redwood_mtkkeys.c`).
+- **Wi-Fi** — CONNSYS brought up (`connsys_step=17`, `WIFID=1`): **discovers/scans nearby Wi-Fi networks, but does not connect/associate yet**.
+- **Bluetooth** — `connsys_bt=2`, `bluetoothd`, `BlueTool`, `nanoregistryd`/`nanoprefsyncd`: Settings → Bluetooth opens, stays on, and scans BLE devices.
+- **Rear Camera** — `s5kgm1sp` (`mtkcam_skel=1`, `bsd/dev/redwood_mtkcam_skel.c`): streams live frames in `Camera.app` (currently laggy/tearing; front camera not yet ported).
+- **Battery** — Real battery percentage in the status bar (`mtkbatt=1`, `bsd/dev/redwood_mtkbatt.c`).
+- **Apps & Shell** — Settings, Clock, Calendar, Photos, Notes, Camera, widgets, SSH by key.
 
-- **Boot** — `mtkloader` on the MT6768 (MMU off, eMMC over MSDC0, a device tree built for XNU); four A55/A75 cores with frequency
-  control (`mtk_cpufreq`).
-- **Memory & storage** — the system root is on eMMC (`emmc_root=1`), not in RAM; about 2.5 GB is available to iOS.
-- **Graphics** — an in-kernel Mali driver (`bsd/dev/redwood_mali.c`), Mesa with **panfrost**, and a **Metal** driver
-  (`userland/src/redwoodmetal.m`, an AIR→NIR compiler): CoreAnimation draws through Metal on the Mali-G52. Lock screen, swipe to
-  unlock, the full home screen, system gestures and Control Center.
-- **Input** — touchscreen (an OmniVision TD4160 on SPI2, `bsd/dev/redwood_tcm.c`), multitouch, wake on touch; the phone's real power and volume buttons.
-- **Sensors** — the accelerometer through the SCP sensor hub (`bsd/dev/redwood_scp.c`); screen rotation in backboardd.
-- **Wi-Fi** — CONNSYS brought up from the phone's own firmware; the phone joins a network from Settings and Safari loads pages over it
-  (`docs/wifi-x6826b.md`).
-- **Bluetooth** — the MT6631's controller behind iOS's own `bluetoothd`: apps see real BLE devices in a scan, and Settings shows the
-  phone as discoverable. A confirmed pairing, the profiles and audio are not done (`docs/bluetooth-x6826b.md`).
-- **Battery** — the real percentage in the status bar (`mtkbatt=1`, `bsd/dev/redwood_mtkbatt.c`): Android's last number, carried on
-  by the MT6358 fuel gauge. The charger chip (RT9471) is not driven yet.
-- **Apps & shell** — Settings, Clock, Calendar, Photos, Notes and more; Safari; Sileo with the Procursus prefix (dpkg/apt) in
-  `/var/jb`; SSH to the phone by key.
-
-**Not yet, or not a goal:** cellular, the phone's speakers and microphones, camera capture, vibration, and writing to the
-system volume (data iOS writes to `/private/var` is instead archived to the `darwin` partition and survives a reboot). Apple's online
-services — activation, Apple ID, iCloud, the App Store — are **not supported and not a goal**: this hardware has no Secure Enclave, and
-nothing Apple's servers verify is forged.
+**Known limitations / not yet working:**
+- **Wi-Fi association** (scans/discovers networks, does not connect yet)
+- **`Settings → General → About`** crashes `Preferences`
+- **Not ported / unsupported:** front camera, speakers/mic audio, cellular/baseband, `ext4` (`iosdata` is `ext2`), and Apple online services (activation, Apple ID, iCloud, App Store — no Secure Enclave).
 
 ## Repositories
 
 | Repository | Contents |
 |---|---|
-| [hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel) | the kernel port, the common drivers, the loader, user space, the tools and this documentation; the Infinix Hot 20 lives on branch `mtk` |
-| [hakios-mt6768](https://github.com/oosexgang/hakios-mt6768) | the Infinix Hot 20 (MediaTek Helio G85) port, with its own loader |
-| [hakios-uefi](https://github.com/oosexgang/hakios-uefi) | the firmware that starts the loader |
-| [hackios-web](https://github.com/oosexgang/hackios-web) | the website |
+| [IOS-for-Merlinx](https://github.com/Yousef13710/IOS-for-Merlinx) | Xiaomi Redmi Note 9 (`merlinx`) port, `ext2` storage, `mtkloader`, userland, installer, and docs (branch `mtk`) |
+| [hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel) | Upstream HakiOS repository (Infinix Hot 20 `X6826B`) |
 
 ## What you bring, and what is never here
 
-Nothing of Apple's and no vendor firmware is in this repository. The Darwin user space, if you want it, you lay out yourself from an
-IPSW you fetch yourself (`ios165/fetch.sh`); the MediaTek firmware — CONNSYS for Wi-Fi/Bluetooth, SCP for the sensors — comes off your
-own phone's Android (`docs/wifi-x6826b.md`, `docs/sensors-x6826b.md`). Nothing is downloaded for you, decrypted or circumvented. No iOS
-file, no phone firmware and no iOS screenshot is checked in.
+Nothing of Apple's and no vendor firmware is in this repository. You fetch the official iOS 16.5 (20F66) IPSW yourself using `./ios165/fetch.sh` and build `userland/root.apfs` + `userland/system.apfs` locally. Your stock `merlinx` `boot.img` can be backed up directly from TWRP before flashing.
 
-## Building
+## Quick Build & Install
 
-The kernel is built from an external XNU source tree plus `xnu/redwood.patch` (`xnu-build.sh`); the user-space libraries and tools are
-built with `userland/build.sh`; the boot image is packed and flashed, and a session is run, by `tools/xnu-cycle.sh`. The system
-image is assembled from your own IPSW (`ios165/fetch.sh`). Every command in order, with what it needs:
-[docs/from-a-clone.md](docs/from-a-clone.md). For another phone: [docs/mtk-porting.md](docs/mtk-porting.md).
+See **[docs/merlinx-install.md](docs/merlinx-install.md)** for full step-by-step instructions:
+
+1. `./ios165/fetch.sh` — download & extract iOS 16.5 (20F66)
+2. `./xnu/apply.sh && ./xnu-build.sh -j8 -k` — build XNU kernel
+3. `cd userland && ... bash build.sh` — build `root.apfs` and `system.apfs` (`xnusys`)
+4. `xnuloader/mkpayload.py` + `mtkloader/build.sh` + `tools/chainboot.py` — build `boot-step7-storage.img`
+5. `bash tools/install-merlinx.sh --repartition --format-iosdata --xnusys userland/system.apfs --boot boot-step7-storage.img --reboot` — partition, format `ext2`, and flash via TWRP ADB
 
 ## License and legal
 
