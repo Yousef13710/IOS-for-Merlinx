@@ -131,7 +131,8 @@ SILEO_BIN="chmod cp mkdir mv rm"
 INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd containermanagerd_system com.apple.WebKit.GPU bluetoothd BlueTool Preferences
 /redwood/lib/libredwood-sb.dylib SpringBoard
 /redwood/lib/libredwood-media.dylib mediaserverd Camera
-/redwood/lib/libredwood-app.dylib Sileo"}
+/redwood/lib/libredwood-app.dylib Sileo
+/redwood/lib/libredwood.lockdown.dylib lockdownd"}
 # APPLEID=1: the Apple ID / App Store libraries of ours as well (ported from origin/AppleID). Opt-in,
 # so every other image is untouched -- like aks_keys, these change daemons (accountsd, akd, ...) that
 # must not be touched where no sign-in happens. libredwood.mad.dylib tells mobileactivationd the
@@ -227,6 +228,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 				-o obj/metal_drv_test src/metal_drv_test.m
 		fi
 		$DYN -o obj/tolog src/tolog.c
+		$DYN -o obj/usbmux_relay src/usbmux_relay.c
 		$DYN -o obj/shm_test src/shm_test.c
 		$DYN -o obj/apfs_mmap_test src/apfs_mmap_test.c
 		$DYN -o obj/vol_ls src/vol_ls.c
@@ -265,6 +267,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -O2 -dynamiclib -install_name /redwood/lib/libredwood-media.dylib -framework CoreFoundation -framework CoreMedia \
 			-framework CoreVideo -framework IOSurface -lobjc \
 			-o obj/libredwood-media.dylib src/inject_media.c src/camera_device.c src/camera_isp.c
+		$DYN -O2 -dynamiclib -install_name /redwood/lib/libredwood.lockdown.dylib -framework CoreFoundation \
+			-Wl,-U,_RemotePairingGetUSBConnectedHostTrustState \
+			-o obj/libredwood.lockdown.dylib src/inject_lockdown.c
 		# ... the Apple ID / App Store libraries (APPLEID=1; ported from origin/AppleID). inside
 		# mobileactivationd, the dev-fused MobileGestalt answers (src/inject_mad.c); inside
 		# akd/accountsd, the one unstorable keychain class rewritten (src/inject_kc.c, the inline
@@ -315,6 +320,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
 	[ -f obj/aks_restore ] && cp obj/aks_restore root/bin/
 	[ -f obj/tolog ] && cp obj/tolog root/bin/
+	[ -f obj/usbmux_relay ] && cp obj/usbmux_relay root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/
 	[ -f obj/torch_test ] && cp obj/torch_test root/bin/
 	[ -f obj/camera_test ] && cp obj/camera_test root/bin/
@@ -338,6 +344,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	fi
 	[ -f obj/libredwood-media.dylib ] && cp obj/libredwood-media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libredwood-app.dylib ] && cp obj/libredwood-app.dylib root/lib/
+	[ -f obj/libredwood.lockdown.dylib ] && cp obj/libredwood.lockdown.dylib root/lib/
 	[ -f obj/libredwood-tweaks.dylib ] && cp obj/libredwood-tweaks.dylib root/lib/
 	[ -f obj/libredwood.mad.dylib ] && cp obj/libredwood.mad.dylib root/lib/     # Apple ID (APPLEID=1)
 	[ -f obj/libredwood.kc.dylib ] && cp obj/libredwood.kc.dylib root/lib/
@@ -436,7 +443,7 @@ with open(path, 'w') as f:
 	rm -f root/etc/quiet
 	[ -n "$QUIET" ] && : > root/etc/quiet
 	# the jobs the iOS launchd will see (/System/Library/LaunchDaemons is a symlink to this directory)
-	cp com.redwood.demo.plist com.redwood.wifi.plist root/LaunchDaemons/
+	cp com.redwood.demo.plist com.redwood.wifi.plist com.redwood.usbmux.plist root/LaunchDaemons/
 	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $IOS/rootfs root/LaunchDaemons $IOS_JOBS
 fi
 # firmware of the phone's own hardware, where somebody has pulled it from the phone's Android into ../fw-gpu

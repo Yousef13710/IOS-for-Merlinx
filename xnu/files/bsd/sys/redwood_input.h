@@ -45,6 +45,7 @@ void redwood_tcm_init(void);            /* boot-arg touchscreen=2: the Infinix's
 void redwood_nvt_init(void);            /* boot-arg touchscreen=3: the Redmi Note 9's Novatek NT36672A */
 void redwood_mali_init(void);            /* boot-arg mali=1: the Infinix's Mali-G52 brought up */
 void redwood_mtkkeys_init(void);         /* boot-arg buttons=2: the Infinix's power and volume keys */
+void redwood_musb_init(void);            /* MT6768 MUSB peripheral (/dev/redwood-usb, Apple USBMux) */
 void redwood_buttons_init(void);        /* boot-arg buttons=1: the phone's power and volume keys */
 void redwood_ufs_init(void);           /* ufs=2 to xnuloader: the phone's storage, read only, through the loader (ufs_shared_pa=) */
 void redwood_ufs_report(const char *when); /* where reading the storage has spent its time so far */

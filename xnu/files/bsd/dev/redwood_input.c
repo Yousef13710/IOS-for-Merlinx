@@ -221,6 +221,7 @@ redwood_input_init(void)
 	redwood_nvt_init();
 	redwood_buttons_init();
 	redwood_mtkkeys_init();
+	redwood_musb_init();
 	redwood_battery_init();
 	redwood_ufs_init();
 	redwood_net_init();
