@@ -21,8 +21,10 @@
 #include <sys/errno.h>
 #include <sys/xattr.h>
 #include <sys/malloc.h>
+#include <kern/clock.h>
 #include <kern/kalloc.h>
 #include <kern/locks.h>
+#include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <pexpert/pexpert.h>
 #include <mach/vm_param.h>
@@ -199,6 +201,9 @@ struct ext2_mount {
 	uint8_t                *em_ra_buf;
 	uint16_t               *em_grp_hint;
 	uint8_t                *em_bmap_buf;
+	bool                    em_sync_stop;
+	bool                    em_sync_running;
+	bool                    em_sync_done;
 };
 
 #define EXT2_MP(mp)   ((struct ext2_mount *)vfs_fsprivate(mp))
@@ -2694,6 +2699,27 @@ const struct vnodeopv_desc ext2_vnodeop_opv_desc = {
 
 /* ---- VFS Operations ---- */
 
+static void
+ext2_sync_thread(void *arg, __unused wait_result_t result)
+{
+	struct ext2_mount *em = (struct ext2_mount *)arg;
+
+	lck_mtx_lock(&em->em_lock);
+	while (!em->em_sync_stop) {
+		uint64_t deadline;
+
+		if (em->em_bcache_dirty > 0 || em->em_sb_dirty || em->em_gd_dirty) {
+			(void)ext2_bcache_flush_all(em);
+			(void)ext2_flush_meta(em);
+		}
+		clock_interval_to_deadline(2000, NSEC_PER_MSEC, &deadline);
+		(void)lck_mtx_sleep_deadline(&em->em_lock, LCK_SLEEP_DEFAULT, (event_t)&em->em_sync_stop, THREAD_UNINT, deadline);
+	}
+	em->em_sync_done = true;
+	wakeup(&em->em_sync_done);
+	lck_mtx_unlock(&em->em_lock);
+}
+
 static int
 ext2_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context_t ctx)
 {
@@ -2823,6 +2849,13 @@ ext2_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context_t c
 	printf("ext2: mounted %s (%llu MB, %u groups, %u free blocks)\n",
 	    sp->f_mntfromname, ((uint64_t)em->em_sb.s_blocks_count * EXT2_BLK_SIZE) >> 20,
 	    em->em_ngroups, em->em_sb.s_free_blocks_count);
+	{
+		thread_t sth = NULL;
+		if (kernel_thread_start(ext2_sync_thread, em, &sth) == KERN_SUCCESS) {
+			em->em_sync_running = true;
+			thread_deallocate(sth);
+		}
+	}
 	return 0;
 }
 
@@ -2837,6 +2870,13 @@ ext2_unmount(mount_t mp, int mntflags, vfs_context_t ctx)
 		return error;
 	}
 	lck_mtx_lock(&em->em_lock);
+	if (em->em_sync_running) {
+		em->em_sync_stop = true;
+		wakeup(&em->em_sync_stop);
+		while (!em->em_sync_done) {
+			(void)lck_mtx_sleep(&em->em_lock, LCK_SLEEP_DEFAULT, (event_t)&em->em_sync_done, THREAD_UNINT);
+		}
+	}
 	(void)ext2_bcache_flush_all(em);
 	(void)ext2_flush_meta(em);
 	ext2_bcache_free_all(em);

@@ -1082,10 +1082,8 @@ frame_end(struct eagl *e, bool finished)
 		if (!big_bound) {
 			big_bound = 1;
 			const char *pn = getprogname();
-			if (pn != NULL && strcmp(pn, "backboardd") == 0) {
-				int big_cpu = 1;
-				(void)sysctlbyname("kern.redwood.bind_cpu", NULL, NULL, &big_cpu, sizeof(big_cpu));
-			}
+			int big_cpu = (pn != NULL && strcmp(pn, "backboardd") == 0) ? 1 : 2;
+			(void)sysctlbyname("kern.redwood.bind_cpu", NULL, NULL, &big_cpu, sizeof(big_cpu));
 		}
 	}
 	if (latency_lines) {

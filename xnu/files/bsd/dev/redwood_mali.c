@@ -1035,6 +1035,10 @@ static LCK_MTX_DECLARE(mali_queue_lock, &mali_lock_group);
 static void
 mali_worker(__unused void *parameter, __unused wait_result_t result)
 {
+	if (real_ncpus > 2) {
+		(void)thread_bind(cpu_to_processor(2));
+		(void)thread_block(THREAD_CONTINUE_NULL);
+	}
 	for (;;) {
 		uint64_t chain, seq;
 		bool fragment;
