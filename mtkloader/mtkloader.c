@@ -1537,6 +1537,14 @@ void xnu_returned(uint64_t log_pa, uint64_t len, uint64_t reason, uint64_t code,
 	save_host_keep(&xsyms);
 	stash_save();
 	show_log_tail(40);
+#ifdef XNU_HOLD_ON_PANIC
+	if (reason != 0 || (xsyms.panic_str && xnu_rd64(xsyms.panic_str) != 0)) {
+		out("\n[XNU_HOLD_ON_PANIC] Halted on panic. Hold Power or Vol+ + Power for recovery.\n");
+		for (;;) {
+			__asm__ volatile("wfe");
+		}
+	}
+#endif
 	dbg_delay_ms(3000);
 	reset_board();
 }

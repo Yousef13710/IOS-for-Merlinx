@@ -341,6 +341,108 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		clang -fobjc-arc -framework Foundation -framework QuartzCore -framework ImageIO -framework CoreGraphics \
 			-o obj/render-ca-wallpaper ../tools/render-ca-wallpaper.m &&
 			mkdir -p root/share && obj/render-ca-wallpaper "$WALLPAPER" root/share/wallpaper.jpg 375 812 0.4 | tail -1
+	elif [ -d "$WALLPAPER" ] && command -v heif-convert >/dev/null 2>&1 && python3 -c "import PIL, numpy" 2>/dev/null && [ ! -f root/share/wallpapers/"20 Pure Obsidian.jpg" ]; then
+		rm -rf root/share/wallpapers
+		mkdir -p root/share/wallpapers
+		IOS_WP_ROOT="$IOS/rootfs/Library/Wallpaper/Collections" python3 - <<'PYEOF'
+import os, shutil, subprocess, tempfile
+import numpy as np
+from PIL import Image
+
+W, H = 750, 1624
+wp_root = os.environ["IOS_WP_ROOT"]
+out_dir = "root/share/wallpapers"
+tmp = tempfile.mkdtemp()
+
+def conv_heic(src, name):
+    dst = os.path.join(tmp, name + ".png")
+    subprocess.run(["heif-convert", "-q", "100", src, dst], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return Image.open(dst).convert("RGBA")
+
+def hex_rgb(h):
+    h = h.lstrip("#")
+    return np.array([int(h[i:i+2], 16) for i in (0, 2, 4)], dtype=np.float32)
+
+yy, xx = np.mgrid[0:H, 0:W]
+nx = xx.astype(np.float32) / W
+ny = yy.astype(np.float32) / H
+rng = np.random.default_rng(165)
+
+def save_np(arr, filename):
+    dither = rng.uniform(-0.6, 0.6, size=arr.shape).astype(np.float32)
+    u8 = np.clip(arr + dither, 0, 255).astype(np.uint8)
+    Image.fromarray(u8, "RGB").save(os.path.join(out_dir, filename), "JPEG", quality=90)
+
+def render_silk(name, c_top, c_bot, waves):
+    t = np.clip(ny * 0.85 + nx * 0.15, 0.0, 1.0)[..., None]
+    img = (1.0 - t) * hex_rgb(c_top) + t * hex_rgb(c_bot)
+    for freq, amp, phase, center, width, col, strength, tilt in waves:
+        curve = center + tilt * (nx - 0.5) + amp * np.sin(nx * freq * np.pi + phase)
+        dist = (ny - curve) / width
+        glow = np.exp(-dist * dist)
+        ridge = np.exp(-((dist - 0.15) * 3.0) ** 2) * 0.35
+        w = np.clip(glow + ridge, 0.0, 1.0)[..., None]
+        img = img * (1.0 - w * strength * 0.55) + hex_rgb(col) * (w * strength)
+    save_np(img, f"{name}.jpg")
+
+def render_orb_arc(name, bg1, bg2, cx, cy, r, rim_col, glow_col):
+    t = np.clip(ny, 0.0, 1.0)[..., None]
+    img = (1.0 - t) * hex_rgb(bg1) + t * hex_rgb(bg2)
+    dx = (nx - cx) * (W / H)
+    dy = ny - cy
+    d = np.sqrt(dx * dx + dy * dy)
+    rim = np.exp(-((d - r) / 0.045) ** 2)[..., None]
+    halo = np.exp(-((d - r) / 0.18) ** 2)[..., None] * 0.55
+    inside = np.clip((r - d) / 0.02, 0.0, 1.0)[..., None]
+    img = img * (1.0 - inside * 0.35)
+    img = img + hex_rgb(glow_col) * halo + hex_rgb(rim_col) * rim * 0.9
+    save_np(img, f"{name}.jpg")
+
+try:
+    # 1. Real iOS 16 WWDC 2022 from .HEIC assets
+    w_dir = os.path.join(wp_root, "iOS_16~iphone.wallpaperCollection/Wallpapers/7400.WWDC_2022-375w-812h@3x~iphone.wallpaper")
+    bg_a = os.path.join(w_dir, "7400.WWDC_2022_Background-375w-812h@3x~iphone.ca/assets")
+    fg_a = os.path.join(w_dir, "7400.WWDC_2022_Foreground-375w-812h@3x~iphone.ca/assets")
+    fl_a = os.path.join(w_dir, "7400.WWDC_2022_Floating-375w-812h@3x~iphone.ca/assets")
+    canvas = Image.new("RGBA", (W, H), (9, 23, 46, 255))
+    for idx, (folder, fn) in enumerate([(bg_a, "Leg.HEIC"), (bg_a, "Head.HEIC"), (fg_a, "Body.HEIC"), (fl_a, "Arm.HEIC")]):
+        p = os.path.join(folder, fn)
+        if os.path.isfile(p):
+            canvas = Image.alpha_composite(canvas, conv_heic(p, f"wwdc_{idx}").resize((W, H), Image.LANCZOS))
+    canvas.convert("RGB").save(os.path.join(out_dir, "01 WWDC 2022.jpg"), "JPEG", quality=90)
+    shutil.copyfile(os.path.join(out_dir, "01 WWDC 2022.jpg"), "root/share/wallpaper.jpg")
+
+    # 2-17. Crisp Apple-style luminous silk waves & mesh gradients
+    silks = [
+        ("02 iOS 16 Blue", "#051937", "#0A2E5C", [(1.4, 0.10, 0.4, 0.35, 0.18, "#00B4D8", 0.75, 0.15), (1.1, 0.12, 2.2, 0.56, 0.20, "#3A86FF", 0.80, -0.18), (1.6, 0.08, 4.0, 0.74, 0.15, "#FFD166", 0.55, 0.12)]),
+        ("03 iOS 16 Pink", "#240B36", "#5C164E", [(1.3, 0.11, 0.8, 0.34, 0.19, "#FF4D8D", 0.80, -0.15), (1.5, 0.09, 2.5, 0.55, 0.18, "#FF85A1", 0.75, 0.20), (1.2, 0.10, 4.4, 0.76, 0.16, "#FFC2D1", 0.50, -0.10)]),
+        ("04 iOS 17 Sunset", "#1F0D38", "#4A154B", [(1.2, 0.12, 0.2, 0.32, 0.18, "#FF6B35", 0.85, 0.18), (1.5, 0.10, 2.0, 0.52, 0.17, "#F72585", 0.80, -0.14), (1.1, 0.09, 3.8, 0.72, 0.18, "#4CC9F0", 0.65, 0.12)]),
+        ("05 Northern Aurora", "#040F16", "#0B2533", [(1.6, 0.11, 0.5, 0.33, 0.17, "#06D6A0", 0.78, -0.22), (1.3, 0.13, 2.1, 0.50, 0.19, "#118AB2", 0.75, 0.18), (1.8, 0.08, 3.7, 0.68, 0.15, "#8338EC", 0.60, -0.15)]),
+        ("06 Ocean Depth", "#020B18", "#041E3A", [(1.4, 0.10, 1.0, 0.40, 0.22, "#0077B6", 0.80, 0.14), (1.7, 0.08, 3.1, 0.60, 0.16, "#00F5D4", 0.65, -0.18), (1.2, 0.09, 5.0, 0.78, 0.15, "#023E8A", 0.70, 0.10)]),
+        ("07 Solar Flare", "#1A0505", "#3D0E0E", [(1.2, 0.11, 0.3, 0.38, 0.20, "#FF4500", 0.85, -0.16), (1.5, 0.09, 2.4, 0.58, 0.16, "#FF9E00", 0.80, 0.15), (1.3, 0.07, 4.1, 0.74, 0.14, "#FFD60A", 0.55, -0.08)]),
+        ("08 Midnight Silk", "#08090F", "#141829", [(1.3, 0.10, 0.9, 0.36, 0.20, "#3F37C9", 0.68, 0.20), (1.6, 0.09, 2.8, 0.56, 0.18, "#4895EF", 0.62, -0.16), (1.1, 0.08, 4.6, 0.75, 0.15, "#B5179E", 0.45, 0.12)]),
+        ("09 Mint Frost", "#062321", "#0D3B36", [(1.4, 0.11, 0.6, 0.35, 0.20, "#2EC4B6", 0.78, -0.14), (1.2, 0.10, 2.5, 0.55, 0.18, "#80FFDB", 0.65, 0.18), (1.5, 0.08, 4.2, 0.73, 0.16, "#56CFE1", 0.60, -0.12)]),
+        ("10 Lavender Mist", "#18122B", "#393053", [(1.3, 0.10, 0.5, 0.34, 0.20, "#9D4EDD", 0.75, 0.16), (1.5, 0.09, 2.3, 0.54, 0.19, "#C77DFF", 0.70, -0.15), (1.2, 0.08, 4.1, 0.74, 0.17, "#72EFDD", 0.48, 0.12)]),
+        ("11 Crimson Ember", "#120309", "#2E0614", [(1.4, 0.11, 0.7, 0.38, 0.19, "#D90429", 0.85, -0.18), (1.2, 0.09, 2.6, 0.58, 0.17, "#EF233C", 0.75, 0.16), (1.6, 0.07, 4.4, 0.75, 0.14, "#FF758F", 0.55, -0.10)]),
+        ("12 Golden Hour", "#1F140A", "#3D2612", [(1.3, 0.10, 0.4, 0.36, 0.20, "#E09F3E", 0.80, 0.15), (1.5, 0.09, 2.2, 0.56, 0.18, "#FFB703", 0.75, -0.16), (1.2, 0.08, 4.0, 0.74, 0.15, "#F4A261", 0.60, 0.10)]),
+        ("13 Cosmic Nebula", "#070417", "#180B3B", [(1.5, 0.11, 0.8, 0.33, 0.18, "#7209B7", 0.82, -0.20), (1.2, 0.10, 2.7, 0.53, 0.19, "#4361EE", 0.78, 0.18), (1.7, 0.08, 4.5, 0.72, 0.15, "#4CC9F0", 0.65, -0.12)]),
+        ("14 Emerald Forest", "#041C14", "#0A3626", [(1.3, 0.10, 0.6, 0.37, 0.20, "#2D6A4F", 0.80, 0.16), (1.6, 0.09, 2.4, 0.56, 0.18, "#52B788", 0.75, -0.18), (1.2, 0.08, 4.2, 0.74, 0.15, "#D8F3DC", 0.42, 0.10)]),
+        ("15 Cobalt Wave", "#030E2B", "#072059", [(1.4, 0.11, 0.3, 0.35, 0.19, "#1D4ED8", 0.82, -0.15), (1.2, 0.10, 2.1, 0.55, 0.18, "#38BDF8", 0.75, 0.18), (1.5, 0.08, 3.9, 0.74, 0.15, "#BAE6FD", 0.50, -0.10)]),
+        ("16 Rose Quartz", "#2B1222", "#52213F", [(1.3, 0.10, 0.5, 0.36, 0.20, "#F472B6", 0.78, 0.14), (1.5, 0.09, 2.3, 0.56, 0.18, "#FB7185", 0.72, -0.16), (1.2, 0.08, 4.1, 0.74, 0.15, "#FDE68A", 0.45, 0.10)]),
+    ]
+    for args in silks:
+        render_silk(*args)
+
+    # 17-20. Pro Titanium & Glass Arc wallpapers
+    render_orb_arc("17 Pro Titanium", "#0A0A0C", "#16171C", 0.50, 0.52, 0.34, "#D4CFC7", "#6B675E")
+    render_orb_arc("18 Pro Deep Purple", "#0B0614", "#1B0F30", 0.46, 0.50, 0.36, "#A855F7", "#4C1D95")
+    render_orb_arc("19 Pro Sierra Blue", "#091522", "#162C42", 0.54, 0.50, 0.35, "#7DD3FC", "#0369A1")
+    render_orb_arc("20 Pure Obsidian", "#000000", "#05070B", 0.50, 0.85, 0.42, "#60A5FA", "#1E3A8A")
+
+    print(f"build.sh: rendered {len(os.listdir(out_dir))} wallpapers in {out_dir}")
+finally:
+    shutil.rmtree(tmp, ignore_errors=True)
+PYEOF
 	fi
 	[ -f obj/libredwood-media.dylib ] && cp obj/libredwood-media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libredwood-app.dylib ] && cp obj/libredwood-app.dylib root/lib/

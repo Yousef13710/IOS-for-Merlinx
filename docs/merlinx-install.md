@@ -18,16 +18,17 @@ The ASCII TUI installer checks your host tools and recovery connection, guides y
 ## 1. Current Status (`merlinx`)
 
 - **Works:**
-  - 8-core SMP (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1800 MHz via `mtk_cpufreq=3`), Mali-G52 @ 1050 MHz (`GL=1` / Mesa Panfrost, `mali_mhz=1050`), tear-free double-buffered display (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1`).
+  - 8-core SMP (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1800 MHz via `mtk_cpufreq=3`), Mali-G52 @ 1050 MHz (`GL=1` / Mesa Panfrost, `mali_mhz=1050`, wired `JOB_IRQ`), smooth UI (`cpu1` `backboardd` GL / `cpu2` `mali_worker` + app GL), tear-free double-buffered display (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1`).
+  - Wallpapers: 20 crisp `750x1624` wallpapers (`WWDC 2022` + 19 Apple-style gradients/arcs) with live **Settings → Wallpaper** picker (`inject.c` + `inject_sb.c`, persisted to `/var/mobile/Library/Redwood/wallpaper.jpg`).
   - USB (`redwood_musb.c`, `mtk_usb=1`, `05ac:12a8` HS 480 Mbps) + `usbmux_relay` + `lockdownd` pairing (`idevice_id`, `idevicepair`, `ideviceinfo`, `idevicedate`, `idevicediagnostics restart` via `TOPRGU_SWRST`).
   - Touchscreen (`redwood_nvt.c`), power & volume buttons (`buttons=2`), battery gauge (`mtkbatt=1`).
   - Bluetooth (`connsys_bt=2`, `bluetoothd`, `BlueTool` — Settings → Bluetooth works and stays on).
   - Wi-Fi & NTP time sync (`connsys_step=17`, `WIFID=1`, `com.apple.timed`): scans, joins, and authenticates on Open & WPA2 networks (2.4 GHz & 5 GHz), DHCP, DNS, TCP/UDP, NTP.
   - Rear camera (`s5kgm1sp`, `mtkcam_skel=1`, live preview in `Camera.app`, currently laggy/tearing).
-  - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, ~51.9 GiB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (**~2.5–3 min boot** [`~2 min 40 s` measured]; un-chopped icons, widgets).
-  - Optional RAM-only `/private/var` mode (`no_ext2=1` boot-arg, ~2 min boot, non-persistent).
+  - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, ~51.9 GiB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, `CMD23`/`CMD25` multi-block eMMC writes, 2 s background dirty-block sync, per-inode `fsync`, and 32 KB read-ahead (**~60 s boot**; un-chopped icons, widgets).
+  - Optional RAM-only `/private/var` mode (`no_ext2=1` boot-arg, non-persistent).
 - **Known Limitations:**
-  - **Laggy UI / apps** and **no wallpaper** currently.
+  - **Live dynamic `PosterBoard` wallpapers** are not enabled (uses fast static `750x1624` wallpapers + **Settings → Wallpaper** picker).
   - **Safari / WebKit:** Stays blank/unresponsive despite working Wi-Fi/DNS/TCP.
   - **`Settings → General → About`:** Currently crashes `Preferences`.
   - **Not ported / unsupported:** Front camera, speakers/mic audio, cellular/baseband, `ext4` (use `ext2` for `iosdata`), and Apple online services (iCloud/App Store/activation).
@@ -42,7 +43,7 @@ The ASCII TUI installer checks your host tools and recovery connection, guides y
 - **TWRP recovery** flashed to `recovery` (`mmcblk0p1`)
 
 ### Host (Linux x86_64)
-- `adb`, `fastboot`, `python3` (with `venv`), `git`, `curl`, `tar`, `xz`, `make`, `cc`, `clang`, `lld` (or run `./tools/get-zig.sh`), `flex`, `bison`, `m4`, `perl`, `autoconf`, `automake`, `meson`, `ninja`, `llvm-ar`, `7zz`/`7z`
+- `adb`, `fastboot`, `python3` (with `venv`, `Pillow`, and `numpy`), `heif-convert` (`libheif-examples`, for rendering the `750x1624` `WWDC 2022` wallpaper), `git`, `curl`, `tar`, `xz`, `make`, `cc`, `clang`, `lld` (or run `./tools/get-zig.sh`), `flex`, `bison`, `m4`, `perl`, `autoconf`, `automake`, `meson`, `ninja`, `llvm-ar`, `7zz`/`7z`
 - **Theos** (`$THEOS`, default `~/theos`) with its Linux toolchain (`toolchain/linux/iphone`) and `sdks/iPhoneOS16.5.sdk`
 - Optional for USB tools on host: `usbmuxd` and `libimobiledevice` (`idevice_id`, `idevicepair`, `ideviceinfo`, `idevicediagnostics`)
 - An iOS 16.5 IPSW (downloaded automatically via `./ios165/fetch.sh`) to generate `userland/root.apfs` and `userland/system.apfs` (`xnusys`) — no Apple binaries are included in this repo

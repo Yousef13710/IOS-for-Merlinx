@@ -38,6 +38,7 @@
 #include <fcntl.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <mach-o/dyld.h>
 #include <notify.h>
 #include <pthread.h>
 #include <objc/message.h>
@@ -938,11 +939,45 @@ keep_line(const char *format, ...)
 	sysctlbyname("kern.redwood.say", NULL, NULL, line, strlen(line));
 }
 
+#define REDWOOD_USER_WALLPAPER "/var/mobile/Library/Redwood/wallpaper.jpg"
+
+static id wallpaper_layers[8];
+static int n_wallpaper_layers;
+
+static id
+load_wallpaper_image(void)
+{
+	const char *p = access(REDWOOD_USER_WALLPAPER, R_OK) == 0 ? REDWOOD_USER_WALLPAPER : REDWOOD_WALLPAPER;
+	id path = (id)CFStringCreateWithCString(NULL, p, kCFStringEncodingUTF8);
+	id img = path ? SEND1(id, objc_getClass("UIImage"), "imageWithContentsOfFile:", id, path) : NULL;
+
+	if (path != NULL) {
+		CFRelease(path);
+	}
+	return img;
+}
+
+static void
+reload_wallpaper(void)
+{
+	id img = load_wallpaper_image();
+	id cg = img ? SEND(id, img, "CGImage") : NULL;
+
+	if (cg == NULL) {
+		return;
+	}
+	for (int i = 0; i < n_wallpaper_layers; i++) {
+		SEND1(void, wallpaper_layers[i], "setContents:", id, cg);
+	}
+	keep_line("redwood: wallpaper: reloaded (%d layers)", n_wallpaper_layers);
+}
+
 static void
 put_wallpaper(int attempt)
 {
 	static id image;
 	static int done;
+	static int notify_reg;
 	Class window = objc_getClass("UIWindow");
 	SEL all = sel_registerName("allWindowsIncludingInternalWindows:onlyVisibleWindows:");
 	id windows;
@@ -950,13 +985,18 @@ put_wallpaper(int attempt)
 	long count;
 	int put = 0;
 
+	if (!notify_reg) {
+		int token = 0;
+		notify_reg = 1;
+		notify_register_dispatch("com.redwood.wallpaper_changed", &token, dispatch_get_main_queue(), ^(__unused int t) {
+			reload_wallpaper();
+		});
+	}
 	if (done) {
 		return;
 	}
 	if (image == NULL) {
-		id path = (id)CFStringCreateWithCString(NULL, REDWOOD_WALLPAPER, kCFStringEncodingUTF8);
-
-		image = SEND1(id, objc_getClass("UIImage"), "imageWithContentsOfFile:", id, path);
+		image = load_wallpaper_image();
 		if (image != NULL) {
 			SEND(id, image, "retain");
 		}
@@ -988,6 +1028,9 @@ put_wallpaper(int attempt)
 			SEND1(void, layer, "setContents:", id, cg);
 			SEND1(void, layer, "setContentsGravity:", id, (id)CFSTR("resizeAspectFill"));
 			SEND1(void, root, "addSublayer:", id, layer);
+			if (n_wallpaper_layers < 8) {
+				wallpaper_layers[n_wallpaper_layers++] = SEND(id, layer, "retain");
+			}
 			keep_line("redwood: wallpaper: on top in window %s, level %g, %s, alpha %g, %ld layers under it, %gx%g", name,
 			    SEND(double, w, "windowLevel"), SEND(BOOL, w, "isHidden") ? "HIDDEN" : "shown", SEND(double, w, "alpha"),
 			    sublayers ? SEND(long, sublayers, "count") : 0L, bounds.w, bounds.h);
@@ -1008,6 +1051,9 @@ put_wallpaper(int attempt)
 			SEND1(void, layer, "setContentsGravity:", id, (id)CFSTR("resizeAspectFill"));
 			SEND1(void, layer, "setZPosition:", double, -1000.0);
 			((void (*)(id, SEL, id, unsigned))objc_msgSend)(root, sel_registerName("insertSublayer:atIndex:"), layer, 0);
+			if (n_wallpaper_layers < 8) {
+				wallpaper_layers[n_wallpaper_layers++] = SEND(id, layer, "retain");
+			}
 			keep_line("redwood: wallpaper: no wallpaper window; under window %s, %gx%g", name, bounds.w, bounds.h);
 			put++;
 		}
@@ -1540,24 +1586,46 @@ ignore_logical_screen_class(__unused id self, __unused SEL selector)
 	return YES;
 }
 
+static int wallpaper_swizzled;
+
+static int
+try_swizzle_wallpaper_screen_class(void)
+{
+	Method method;
+
+	if (wallpaper_swizzled) {
+		return 1;
+	}
+	method = class_getInstanceMethod(objc_getClass("NSUserDefaults"),
+	    sel_registerName("wk_ignoreLogicalScreenClassForWallpaperBundle"));
+	if (method == NULL) {
+		return 0;
+	}
+	method_setImplementation(method, (IMP)ignore_logical_screen_class);
+	wallpaper_swizzled = 1;
+	keep_line("%s: WallpaperKit takes a wallpaper of any screen class", getprogname());
+	return 1;
+}
+
+static void
+on_wallpaper_image_added(__unused const struct mach_header *mh, __unused intptr_t vmaddr_slide)
+{
+	(void)try_swizzle_wallpaper_screen_class();
+}
+
 static void
 wallpaper_any_screen_class(void)
 {
 	char args[1024] = "";
 	size_t size = sizeof(args) - 1;
-	Method method = class_getInstanceMethod(objc_getClass("NSUserDefaults"),
-	    sel_registerName("wk_ignoreLogicalScreenClassForWallpaperBundle"));
 
 	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "wk_screenclass=1") != NULL) {
 		return;
 	}
-	if (method == NULL) {
-		keep_line("%s: no -[NSUserDefaults wk_ignoreLogicalScreenClassForWallpaperBundle] (WallpaperKit not loaded)",
-		    getprogname());
-		return;
+	if (!try_swizzle_wallpaper_screen_class()) {
+		keep_line("%s: waiting for WallpaperKit to take any screen class", getprogname());
+		_dyld_register_func_for_add_image(on_wallpaper_image_added);
 	}
-	method_setImplementation(method, (IMP)ignore_logical_screen_class);
-	keep_line("%s: WallpaperKit takes a wallpaper of any screen class", getprogname());
 }
 
 /*

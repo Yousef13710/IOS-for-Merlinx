@@ -30,6 +30,8 @@
 #include <Block.h>
 #include <dispatch/dispatch.h>
 #include <dlfcn.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #include <execinfo.h>
 #include <mach-o/dyld.h>
 #include <libkern/OSCacheControl.h>
@@ -3197,6 +3199,322 @@ bluetool_serves(void)
 	dispatch_main();
 }
 
+static int pref_wk_swizzled;
+
+static BOOL
+pref_ignore_logical_screen_class(__unused id self, __unused SEL selector)
+{
+	return YES;
+}
+
+static int
+pref_try_swizzle_wk(void)
+{
+	Method m;
+
+	if (pref_wk_swizzled) {
+		return 1;
+	}
+	m = class_getInstanceMethod(objc_getClass("NSUserDefaults"),
+	    sel_registerName("wk_ignoreLogicalScreenClassForWallpaperBundle"));
+	if (m == NULL) {
+		return 0;
+	}
+	method_setImplementation(m, (IMP)pref_ignore_logical_screen_class);
+	pref_wk_swizzled = 1;
+	pref_say("Preferences: WallpaperKit takes a wallpaper of any screen class");
+	return 1;
+}
+
+static void
+pref_on_image_added(__unused const struct mach_header *mh, __unused intptr_t slide)
+{
+	(void)pref_try_swizzle_wk();
+}
+
+#define RW_WP_DIR "/redwood/share/wallpapers"
+#define RW_WP_USER_DIR "/var/mobile/Library/Redwood"
+#define RW_WP_USER_FILE "/var/mobile/Library/Redwood/wallpaper.jpg"
+#define RW_WP_CUR_FILE "/var/mobile/Library/Redwood/current.txt"
+#define RW_WP_MAX 64
+
+static char wp_files[RW_WP_MAX][128];
+static char wp_names[RW_WP_MAX][128];
+static id wp_thumbs[RW_WP_MAX];
+static int wp_count;
+static char wp_current[128] = "01 WWDC 2022";
+static void (*orig_nav_push)(id, SEL, id, BOOL);
+
+static int
+wp_cmp_str(const void *a, const void *b)
+{
+	return strcmp((const char *)a, (const char *)b);
+}
+
+static void
+wp_scan_wallpapers(void)
+{
+	DIR *d;
+	struct dirent *e;
+	FILE *f;
+
+	wp_count = 0;
+	d = opendir(RW_WP_DIR);
+	if (d != NULL) {
+		while ((e = readdir(d)) != NULL && wp_count < RW_WP_MAX) {
+			size_t len = strlen(e->d_name);
+			if (len > 4 && strcmp(e->d_name + len - 4, ".jpg") == 0) {
+				snprintf(wp_files[wp_count], sizeof(wp_files[wp_count]), "%s", e->d_name);
+				wp_count++;
+			}
+		}
+		closedir(d);
+	}
+	if (wp_count > 1) {
+		qsort(wp_files, (size_t)wp_count, sizeof(wp_files[0]), wp_cmp_str);
+	}
+	for (int i = 0; i < wp_count; i++) {
+		size_t len = strlen(wp_files[i]);
+		size_t copy_len = len > 4 ? len - 4 : len;
+		if (copy_len >= sizeof(wp_names[i])) {
+			copy_len = sizeof(wp_names[i]) - 1;
+		}
+		memcpy(wp_names[i], wp_files[i], copy_len);
+		wp_names[i][copy_len] = '\0';
+		wp_thumbs[i] = NULL;
+	}
+	f = fopen(RW_WP_CUR_FILE, "r");
+	if (f != NULL) {
+		if (fgets(wp_current, sizeof(wp_current), f) != NULL) {
+			size_t n = strlen(wp_current);
+			while (n > 0 && (wp_current[n - 1] == '\n' || wp_current[n - 1] == '\r')) {
+				wp_current[--n] = '\0';
+			}
+		}
+		fclose(f);
+	}
+}
+
+static int
+wp_copy_file(const char *src, const char *dst)
+{
+	char tmp[256];
+	int in_fd, out_fd;
+	char buf[16384];
+	ssize_t r;
+
+	mkdir("/var/mobile/Library", 0755);
+	mkdir(RW_WP_USER_DIR, 0755);
+	snprintf(tmp, sizeof(tmp), "%s.tmp", dst);
+	in_fd = open(src, O_RDONLY);
+	if (in_fd < 0) {
+		return -1;
+	}
+	out_fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (out_fd < 0) {
+		close(in_fd);
+		return -1;
+	}
+	while ((r = read(in_fd, buf, sizeof(buf))) > 0) {
+		ssize_t off = 0;
+		while (off < r) {
+			ssize_t w = write(out_fd, buf + off, (size_t)(r - off));
+			if (w <= 0) {
+				close(in_fd);
+				close(out_fd);
+				unlink(tmp);
+				return -1;
+			}
+			off += w;
+		}
+	}
+	close(in_fd);
+	fsync(out_fd);
+	close(out_fd);
+	return rename(tmp, dst);
+}
+
+static void
+wp_vc_viewDidLoad(id self, SEL _cmd)
+{
+	struct objc_super sup = { self, objc_getClass("UITableViewController") };
+	id tv;
+
+	(void)_cmd;
+	((void (*)(struct objc_super *, SEL))objc_msgSendSuper)(&sup, sel_registerName("viewDidLoad"));
+	((void (*)(id, SEL, id))objc_msgSend)(self, sel_registerName("setTitle:"), (id)CFSTR("Wallpaper"));
+	tv = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("tableView"));
+	if (tv != NULL) {
+		((void (*)(id, SEL, double))objc_msgSend)(tv, sel_registerName("setRowHeight:"), 68.0);
+	}
+}
+
+static long
+wp_vc_sections(__unused id self, __unused SEL _cmd, __unused id tv)
+{
+	return 1;
+}
+
+static long
+wp_vc_rows(__unused id self, __unused SEL _cmd, __unused id tv, __unused long section)
+{
+	return wp_count;
+}
+
+static id
+wp_vc_header(__unused id self, __unused SEL _cmd, __unused id tv, __unused long section)
+{
+	return (id)CFSTR("iOS 16 Default Wallpapers");
+}
+
+static id
+wp_vc_cell(__unused id self, __unused SEL _cmd, id tv, id indexPath)
+{
+	long row = ((long (*)(id, SEL))objc_msgSend)(indexPath, sel_registerName("row"));
+	id cell = ((id (*)(id, SEL, id))objc_msgSend)(tv, sel_registerName("dequeueReusableCellWithIdentifier:"), (id)CFSTR("rw_wp"));
+	id label, iv;
+	CFStringRef s;
+
+	if (cell == NULL) {
+		id alloced = ((id (*)(Class, SEL))objc_msgSend)(objc_getClass("UITableViewCell"), sel_registerName("alloc"));
+		cell = ((id (*)(id, SEL, long, id))objc_msgSend)(alloced, sel_registerName("initWithStyle:reuseIdentifier:"), 0L, (id)CFSTR("rw_wp"));
+	}
+	if (row < 0 || row >= wp_count) {
+		return cell;
+	}
+	label = ((id (*)(id, SEL))objc_msgSend)(cell, sel_registerName("textLabel"));
+	s = CFStringCreateWithCString(NULL, wp_names[row], kCFStringEncodingUTF8);
+	if (label != NULL && s != NULL) {
+		((void (*)(id, SEL, id))objc_msgSend)(label, sel_registerName("setText:"), (id)s);
+	}
+	if (s != NULL) {
+		CFRelease(s);
+	}
+	if (wp_thumbs[row] == NULL) {
+		char path[256];
+		CFStringRef p;
+		snprintf(path, sizeof(path), "%s/%s", RW_WP_DIR, wp_files[row]);
+		p = CFStringCreateWithCString(NULL, path, kCFStringEncodingUTF8);
+		if (p != NULL) {
+			id img = ((id (*)(Class, SEL, id))objc_msgSend)(objc_getClass("UIImage"), sel_registerName("imageWithContentsOfFile:"), (id)p);
+			if (img != NULL) {
+				wp_thumbs[row] = ((id (*)(id, SEL))objc_msgSend)(img, sel_registerName("retain"));
+			}
+			CFRelease(p);
+		}
+	}
+	iv = ((id (*)(id, SEL))objc_msgSend)(cell, sel_registerName("imageView"));
+	if (iv != NULL && wp_thumbs[row] != NULL) {
+		((void (*)(id, SEL, id))objc_msgSend)(iv, sel_registerName("setImage:"), wp_thumbs[row]);
+		((void (*)(id, SEL, long))objc_msgSend)(iv, sel_registerName("setContentMode:"), 2L);
+		((void (*)(id, SEL, BOOL))objc_msgSend)(iv, sel_registerName("setClipsToBounds:"), YES);
+	}
+	((void (*)(id, SEL, long))objc_msgSend)(cell, sel_registerName("setAccessoryType:"),
+	    strcmp(wp_names[row], wp_current) == 0 ? 3L : 0L);
+	return cell;
+}
+
+static void
+wp_vc_didSelect(__unused id self, __unused SEL _cmd, id tv, id indexPath)
+{
+	long row = ((long (*)(id, SEL))objc_msgSend)(indexPath, sel_registerName("row"));
+	char src[256];
+	FILE *f;
+
+	((void (*)(id, SEL, id, BOOL))objc_msgSend)(tv, sel_registerName("deselectRowAtIndexPath:animated:"), indexPath, YES);
+	if (row < 0 || row >= wp_count) {
+		return;
+	}
+	snprintf(src, sizeof(src), "%s/%s", RW_WP_DIR, wp_files[row]);
+	if (wp_copy_file(src, RW_WP_USER_FILE) == 0) {
+		snprintf(wp_current, sizeof(wp_current), "%s", wp_names[row]);
+		f = fopen(RW_WP_CUR_FILE, "w");
+		if (f != NULL) {
+			fprintf(f, "%s\n", wp_current);
+			fclose(f);
+		}
+		notify_post("com.redwood.wallpaper_changed");
+		{
+			char msg[192];
+			snprintf(msg, sizeof(msg), "Preferences: wallpaper changed to %s", wp_current);
+			pref_say(msg);
+		}
+	}
+	((void (*)(id, SEL))objc_msgSend)(tv, sel_registerName("reloadData"));
+}
+
+static Class
+wp_ensure_vc_class(void)
+{
+	static Class cls;
+
+	if (cls != NULL) {
+		return cls;
+	}
+	cls = objc_allocateClassPair(objc_getClass("UITableViewController"), "RedwoodWallpaperVC", 0);
+	if (cls == NULL) {
+		return objc_getClass("RedwoodWallpaperVC");
+	}
+	class_addMethod(cls, sel_registerName("viewDidLoad"), (IMP)wp_vc_viewDidLoad, "v@:");
+	class_addMethod(cls, sel_registerName("numberOfSectionsInTableView:"), (IMP)wp_vc_sections, "q@:@");
+	class_addMethod(cls, sel_registerName("tableView:numberOfRowsInSection:"), (IMP)wp_vc_rows, "q@:@q");
+	class_addMethod(cls, sel_registerName("tableView:titleForHeaderInSection:"), (IMP)wp_vc_header, "@@:@q");
+	class_addMethod(cls, sel_registerName("tableView:cellForRowAtIndexPath:"), (IMP)wp_vc_cell, "@@:@@");
+	class_addMethod(cls, sel_registerName("tableView:didSelectRowAtIndexPath:"), (IMP)wp_vc_didSelect, "v@:@@");
+	objc_registerClassPair(cls);
+	return cls;
+}
+
+static void
+hooked_nav_push(id self, SEL _cmd, id vc, BOOL animated)
+{
+	const char *cls = vc ? object_getClassName(vc) : "";
+	char tbuf[64] = "";
+	id title = vc ? ((id (*)(id, SEL))objc_msgSend)(vc, sel_registerName("title")) : NULL;
+
+	if (title != NULL) {
+		CFStringGetCString((CFStringRef)title, tbuf, sizeof(tbuf), kCFStringEncodingUTF8);
+	}
+	if (strcmp(cls, "RedwoodWallpaperVC") != 0 &&
+	    (strstr(cls, "Wallpaper") != NULL || strcmp(tbuf, "Wallpaper") == 0)) {
+		Class wp_cls = wp_ensure_vc_class();
+		if (wp_cls != NULL) {
+			id alloced = ((id (*)(Class, SEL))objc_msgSend)(wp_cls, sel_registerName("alloc"));
+			id custom = ((id (*)(id, SEL, long))objc_msgSend)(alloced, sel_registerName("initWithStyle:"), 1L);
+			if (custom != NULL) {
+				wp_scan_wallpapers();
+				{
+					char msg[192];
+					snprintf(msg, sizeof(msg), "Preferences: opening RedwoodWallpaperVC (%d wallpapers) instead of %s", wp_count, cls);
+					pref_say(msg);
+				}
+				orig_nav_push(self, _cmd, custom, animated);
+				return;
+			}
+		}
+	}
+	orig_nav_push(self, _cmd, vc, animated);
+}
+
+static void
+pref_install_wallpaper_settings(void)
+{
+	Class nav = objc_getClass("UINavigationController");
+	Method m = nav ? class_getInstanceMethod(nav, sel_registerName("pushViewController:animated:")) : NULL;
+
+	if (m == NULL) {
+		return;
+	}
+	wp_scan_wallpapers();
+	orig_nav_push = (void (*)(id, SEL, id, BOOL))method_getImplementation(m);
+	method_setImplementation(m, (IMP)hooked_nav_push);
+	{
+		char msg[128];
+		snprintf(msg, sizeof(msg), "Preferences: installed Wallpaper settings hook (%d wallpapers)", wp_count);
+		pref_say(msg);
+	}
+}
+
 __attribute__((constructor))
 static void
 redwood_init(void)
@@ -3275,6 +3593,8 @@ redwood_init(void)
 		(void)sysctlbyname("kern.redwood.host_keep", NULL, NULL, line, strnlen(line, sizeof(line)));
 	} else if (strcmp(name, "Preferences") == 0) {
 		pthread_t thread;
+		char args[1024] = "";
+		size_t size = sizeof(args) - 1;
 
 		in_preferences = true;           /* Settings: its XPC to bluetoothd is said (Bluetooth pane, run 732) */
 		pref_log = os_log_create("com.apple.Preferences", "redwood");
@@ -3283,6 +3603,11 @@ redwood_init(void)
 		pref_main_thread = mach_thread_self();
 		pthread_create(&thread, NULL, pref_hang_watch, NULL);
 		pthread_detach(thread);
+		pref_install_wallpaper_settings();
+		if ((sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0 || strstr(args, "wk_screenclass=1") == NULL) &&
+		    !pref_try_swizzle_wk()) {
+			_dyld_register_func_for_add_image(pref_on_image_added);
+		}
 	} else if (strcmp(name, "BlueTool") == 0) {
 		bluetool_serves();
 	} else if (strcmp(name, "com.apple.WebKit.GPU") == 0) {
