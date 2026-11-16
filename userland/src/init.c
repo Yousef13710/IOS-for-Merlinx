@@ -639,6 +639,52 @@ own_tree(const char *path, int uid)
 	return ok;
 }
 
+static int
+fix_zero_perms(const char *path, int fallback_uid)
+{
+	char buf[4096], child[512];
+	struct stat st;
+	off_t position = 0;
+	ssize_t n;
+	int fixed = 0, fd, is_dir;
+
+	if (lstat(path, &st) != 0 || (st.st_mode & S_IFMT) == S_IFLNK) {
+		return 0;
+	}
+	is_dir = (st.st_mode & S_IFMT) == S_IFDIR;
+	if ((st.st_mode & 0777) == 0) {
+		if (chmod(path, is_dir ? 0755 : 0644) == 0) {
+			fixed++;
+		}
+	}
+	if (st.st_uid == 65534 || st.st_gid == 65534) {
+		int u = st.st_uid == 65534 ? fallback_uid : (int)st.st_uid;
+		int g = st.st_gid == 65534 ? fallback_uid : (int)st.st_gid;
+		chown(path, u, g);
+	}
+	if (!is_dir || strlen(path) + 256 >= sizeof(child)) {
+		return fixed;
+	}
+	if ((fd = open(path, O_RDONLY | O_DIRECTORY, 0)) < 0) {
+		return fixed;
+	}
+	while ((n = getdirentries(fd, buf, sizeof(buf), &position)) > 0) {
+		for (ssize_t at = 0; at < n; at += ((struct dirent *)(buf + at))->d_reclen) {
+			const char *name = ((struct dirent *)(buf + at))->d_name;
+
+			if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+				continue;
+			}
+			strcpy(child, path);
+			strcpy(child + strlen(child), "/");
+			strcpy(child + strlen(child), name);
+			fixed += fix_zero_perms(child, fallback_uid);
+		}
+	}
+	close(fd);
+	return fixed;
+}
+
 /*
  * The rootless prefix of a package manager, /var/jb: the Procursus bootstrap with Sileo in it
  * (tools/mk-jb.sh) rides in the system image as /jb (or in the boot volume, /private/preboot/jb,
@@ -795,8 +841,24 @@ mount_writable(void)
 	printf("\n-- writable filesystem --\n");
 	if ((!no_ext2 || strcmp(no_ext2, "1") != 0) &&
 	    stat("/dev/emmc1", &st) == 0 && mount("ext2", "/private/var", 0, (void *)"/dev/emmc1") == 0) {
+		int nfixed;
 		ok = 1;
 		printf("  mounted /dev/emmc1 (ext2) on /private/var\n");
+		nfixed = fix_zero_perms("/private/var/containers", 0) +
+		    fix_zero_perms("/private/var/mobile/Library", 501);
+		if (nfixed > 0) {
+			printf("  repaired %d zero-permission entries on ext2\n", nfixed);
+		}
+		{
+			struct stat kc_st, wal_st;
+			if (stat("/private/var/Keychains/keychain-2.db", &kc_st) == 0 && kc_st.st_size <= 4096 &&
+			    stat("/private/var/Keychains/keychain-2.db-wal", &wal_st) == 0 && wal_st.st_size > 262144) {
+				unlink("/private/var/Keychains/keychain-2.db");
+				unlink("/private/var/Keychains/keychain-2.db-wal");
+				unlink("/private/var/Keychains/keychain-2.db-shm");
+				printf("  cleared wedged keychain-2.db* (wal %lld bytes)\n", (long long)wal_st.st_size);
+			}
+		}
 	} else {
 		if ((!no_ext2 || strcmp(no_ext2, "1") != 0) && stat("/dev/emmc1", &st) == 0) {
 			printf("  ext2 mount failed (%s), falling back to ramfs\n", strerror(errno));
