@@ -65,10 +65,16 @@ run_adb() {
 	fi
 }
 
-echo "== Checking TWRP ADB connection =="
+echo "== Checking Recovery ADB connection =="
 STATE=$("${ADB[@]}" get-state 2>/dev/null || true)
-if [ "$STATE" != "recovery" ]; then
-	echo "Error: device must be booted into TWRP recovery (got state: '${STATE:-none}')." >&2
+if [ "$STATE" != "recovery" ] && [ "$STATE" != "device" ]; then
+	echo "Error: device must be booted into recovery with root ADB (got state: '${STATE:-none}')." >&2
+	exit 1
+fi
+
+UID_CHECK=$("${ADB[@]}" shell "id -u" 2>/dev/null | tr -d '\r' || true)
+if [ "$UID_CHECK" != "0" ]; then
+	echo "Error: recovery ADB is not running as root (id -u = '${UID_CHECK:-unknown}'). Enable root ADB in your recovery." >&2
 	exit 1
 fi
 
@@ -96,17 +102,17 @@ if [ "$DO_REPART" -eq 1 ]; then
 	run_adb shell "rm -f /tmp/$BACKUP"
 
 	echo "== Repartitioning /dev/block/mmcblk0 =="
-	run_adb shell "umount /data /cache /sdcard 2>/dev/null || true"
+	run_adb shell "umount /data /cache /sdcard /iosdata 2>/dev/null || true"
 	run_adb shell "sgdisk --delete=43 --delete=44 --delete=45 --delete=48 /dev/block/mmcblk0 2>/dev/null || true"
 	run_adb shell "sgdisk --new=43:4767744:113631231 --change-name=43:iosdata --typecode=43:8300 /dev/block/mmcblk0"
 	run_adb shell "sgdisk --new=48:113631232:122021823 --change-name=48:xnusys --typecode=48:8300 /dev/block/mmcblk0"
-	run_adb shell "partprobe /dev/block/mmcblk0 || blockdev --rereadpt /dev/block/mmcblk0"
+	run_adb shell "partprobe /dev/block/mmcblk0 2>/dev/null || blockdev --rereadpt /dev/block/mmcblk0 2>/dev/null || true"
+	sleep 1
 fi
 
 if [ "$DO_FORMAT" -eq 1 ]; then
 	echo "== Formatting /dev/block/by-name/iosdata as ext2 =="
-	run_adb shell "umount /dev/block/by-name/iosdata 2>/dev/null || true"
-	run_adb shell "mke2fs -t ext2 -b 4096 -F -L iosdata /dev/block/by-name/iosdata"
+	run_adb shell "IOSDATA_DEV=/dev/block/by-name/iosdata; [ -e \"\$IOSDATA_DEV\" ] || IOSDATA_DEV=/dev/block/mmcblk0p43; umount \"\$IOSDATA_DEV\" 2>/dev/null || true; (command -v mke2fs >/dev/null && mke2fs -t ext2 -b 4096 -F -L iosdata \"\$IOSDATA_DEV\") || mkfs.ext2 -b 4096 -F -L iosdata \"\$IOSDATA_DEV\""
 fi
 
 if [ -n "$XNUSYS_IMG" ]; then
@@ -116,7 +122,7 @@ if [ -n "$XNUSYS_IMG" ]; then
 	fi
 	echo "== Flashing $XNUSYS_IMG to /dev/block/by-name/xnusys =="
 	run_adb push "$XNUSYS_IMG" /tmp/xnusys.img
-	run_adb shell "dd if=/tmp/xnusys.img of=/dev/block/by-name/xnusys bs=4M && sync && rm -f /tmp/xnusys.img"
+	run_adb shell "XNUSYS_DEV=/dev/block/by-name/xnusys; [ -e \"\$XNUSYS_DEV\" ] || XNUSYS_DEV=/dev/block/mmcblk0p48; dd if=/tmp/xnusys.img of=\"\$XNUSYS_DEV\" bs=4M && sync && rm -f /tmp/xnusys.img"
 fi
 
 if [ -n "$BOOT_IMG" ]; then

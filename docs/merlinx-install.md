@@ -3,7 +3,15 @@
 Complete guide to building and installing HakiOS (XNU 8796.121.2 / iOS 16.5) on the **Xiaomi Redmi Note 9 (`merlinx`, MediaTek Helio G85 MT6768, 3 GB RAM)** with on-eMMC `xnusys` (4.0 GiB) and persistent `iosdata` (`ext2`, ~51.9 GiB).
 
 > [!WARNING]
-> **This replaces Android's `super`, `cache`, and `userdata` partitions** when setting up `iosdata` + `xnusys`. Back up your data and GPT partition table first. Keep **TWRP** in `recovery` so you always have root ADB access and `/sys/fs/pstore` logs.
+> **ALL DATA ON YOUR PHONE WILL BE LOST.** Installing HakiOS completely deletes Android's `super`, `cache`, and `userdata` partitions and replaces them with `iosdata` (`ext2`) + `xnusys`. No backup is made.
+
+## Automated Installer (Recommended)
+
+Boot your `merlinx` into **any modern custom recovery with root ADB** (TWRP, OrangeFox, PitchBlack, SHRP, Lineage Recovery, etc.), connect USB, and run:
+```bash
+./setup-merlinx.sh
+```
+The ASCII TUI installer checks your host tools and recovery connection, guides you if anything is missing, fetches iOS 16.5, builds XNU/Mesa/userland/`boot-ios.img`, repartitions, formats `ext2`, and flashes the device.
 
 ---
 
