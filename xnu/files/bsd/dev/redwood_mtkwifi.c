@@ -1097,9 +1097,8 @@ wf_tx_command_frame(const uint8_t *frame, uint32_t length, bool management, uint
 		return false;
 	}
 	wf_txd(buffer, frame, length, management, true, wlan, false, sn);
-	if (!management) {
-		/* a security frame (nic_txd_v1_compose_security_frame): at the BSS's lowest basic rate, fixed in the TXD --
-		 * run 449: without it (and with packet format 0) message 2 went out and nothing came back, the MCU silent */
+	{
+		/* Fix management & security frames to the BSS's lowest basic rate (OFDM 6M on 5 GHz, CCK 1M on 2.4 GHz) */
 		const uint16_t rate = wf_lowest_rate();
 
 		buffer[11] |= 1u << 7;                          /* TX_DESC_FIXED_RATE */
