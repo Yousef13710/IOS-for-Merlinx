@@ -298,6 +298,13 @@ write_blocks(uint64_t lba, uint32_t blocks, const uint32_t *src)
 		return false;
 	}
 	pio_mode();
+	/* Defined-length multi-block write (CMD23 + CMD25): no CMD12 stop needed */
+	wr(SDC_BLK_NUM, 1);
+	wr(SDC_ARG, blocks);
+	wr(SDC_CMD, 23 | CMD_RSP_R1);
+	if (!wait_int(INT_CMDRDY, INT_CMDTMO | INT_RSPCRCERR, "set block count")) {
+		return false;
+	}
 	wr(SDC_BLK_NUM, blocks);
 	wr(SDC_ARG, (uint32_t)lba);
 	wr(SDC_CMD, 25 | CMD_RSP_R1 | CMD_DTYPE_MULTI | CMD_WRITE | CMD_BLKLEN(512));
@@ -334,12 +341,24 @@ write_blocks(uint64_t lba, uint32_t blocks, const uint32_t *src)
 		(void)stop();
 		return false;
 	}
-	return stop();
+	return wait_idle();
 }
+
+static bool cmd25_ok = true;
 
 static bool
 write_retrying(uint64_t lba, uint32_t blocks, const uint32_t *src)
 {
+	if (blocks > 1 && cmd25_ok) {
+		if (write_blocks(lba, blocks, src)) {
+			return true;
+		}
+		cmd25_ok = false;
+		printf("emmc: CMD25 failed (%s %#x) for %u blocks at %llu; falling back to CMD24\n",
+		    emmc_failed ? emmc_failed : "?", emmc_failed_status, blocks, lba);
+		pio_mode();
+		(void)stop();
+	}
 	for (uint32_t b = 0; b < blocks; b++) {
 		const uint32_t *p = src + b * (512 / 4);
 		if (write_one_block(lba + b, p)) {
