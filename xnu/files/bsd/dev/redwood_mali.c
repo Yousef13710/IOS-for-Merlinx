@@ -21,6 +21,7 @@
  * says how far it got: 6 means every step above worked.
  */
 #include <kern/clock.h>
+#include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
@@ -38,6 +39,18 @@ extern vm_offset_t phystokv(uint64_t pa);
 extern void RedwoodMaliStart(void);
 extern uint32_t gMaliClients, gMaliBuffers, gMaliSubmits, gMaliFailed, gMaliShown;   /* RedwoodMali.cpp */
 extern struct mali_made { uint64_t address, size; uint32_t asked, flags; } gMaliMade[32];
+extern kern_return_t gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context);
+extern void gic_v3_spi_mask(uint32_t intid);
+extern void gic_v3_spi_unmask(uint32_t intid);
+extern uint64_t gic_v3_spi_count(uint32_t intid);
+
+#define SYSIRQ_PHYS        0x0c53a000
+#define SYSIRQ_POL_OFF     0x650
+#define MALI_JOB_SPI       276u
+#define MALI_JOB_GIC_INTID (MALI_JOB_SPI + 32u)  /* MT6768 DT mali@13040000 "JOB" SPI 0x114 */
+static bool mali_irq_attached;
+static int mali_wait_event;
+static void mali_job_irq(__unused void *context, __unused uint32_t intid);
 
 #define TOPCKGEN_PHYS   0x10000000
 #define INFRACFG_PHYS   0x10001000
@@ -205,7 +218,6 @@ static uint32_t gl_said, gl_middle;
 extern void *cpu_to_processor(int cpu);
 extern void *thread_bind(void *processor);
 extern unsigned int real_ncpus;
-extern int thread_block(void *continuation);
 
 static int
 bind_cpu(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req)
@@ -577,6 +589,26 @@ mali_up(void)
 	default:
 		break;
 	}
+	if (reached >= 6) {
+		vm_offset_t sysirq = ml_io_map(SYSIRQ_PHYS, 0x1000);
+		if (sysirq != 0) {
+			/* MT6768 DT marks Mali JOB IRQ as 0x08 (LEVEL_LOW): set sysirq invert bit */
+			uint32_t pol_off = SYSIRQ_POL_OFF + (MALI_JOB_SPI / 32u) * 4u;
+			wr(sysirq, pol_off, rd(sysirq, pol_off) | (1u << (MALI_JOB_SPI % 32u)));
+		}
+		wr(mali, JOB_INT_MASK, 0);
+		wr(mali, JOB_INT_CLEAR, 0xffffffffu);
+		if (gic_v3_spi_attach(MALI_JOB_GIC_INTID, false, mali_job_irq, NULL) == KERN_SUCCESS) {
+			delay(100);
+			gic_v3_spi_mask(MALI_JOB_GIC_INTID);
+			if (gic_v3_spi_count(MALI_JOB_GIC_INTID) == 0) {
+				mali_irq_attached = true;
+			} else {
+				printf("mali: JOB_IRQ %u fired while masked (%llu), falling back to poll\n",
+				    MALI_JOB_GIC_INTID, gic_v3_spi_count(MALI_JOB_GIC_INTID));
+			}
+		}
+	}
 }
 
 /* ---- what the service that programs talk to uses (iokit/Kernel/RedwoodMali.cpp) ---- */
@@ -604,23 +636,51 @@ static LCK_MTX_DECLARE(mali_job_lock, &mali_lock_group);
  * asleep 200 us at a time. The wait used to spin (delay(10) in a loop) for as long as the GPU
  * worked -- a whole core of the four lost to every frame's rendering.
  */
-static int mali_wait_event;
+static void
+mali_job_irq(__unused void *context, __unused uint32_t intid)
+{
+	gic_v3_spi_mask(MALI_JOB_GIC_INTID);
+	wr(mali, JOB_INT_MASK, 0);
+	thread_wakeup((event_t)&mali_wait_event);
+}
 
 static bool
 wait_job(uint32_t at, uint32_t mask, uint32_t want, uint32_t ms)
 {
 	uint64_t deadline;
 
-	for (int i = 0; i < 20; i++) {
-		if ((rd(mali, at) & mask) == want) {
-			return true;
+	for (int i = 0; i < 5; i++) {
+		if ((rd(mali, at) & mask) != 0) {
+			return (rd(mali, at) & mask) == want;
 		}
-		delay(10);
+		delay(5);
 	}
 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+	if (mali_irq_attached) {
+		for (;;) {
+			assert_wait_deadline((event_t)&mali_wait_event, THREAD_UNINT, deadline);
+			wr(mali, JOB_INT_MASK, mask);
+			gic_v3_spi_unmask(MALI_JOB_GIC_INTID);
+			if ((rd(mali, at) & mask) != 0 || mach_absolute_time() >= deadline) {
+				clear_wait(current_thread(), THREAD_AWAKENED);
+				gic_v3_spi_mask(MALI_JOB_GIC_INTID);
+				wr(mali, JOB_INT_MASK, 0);
+				return (rd(mali, at) & mask) == want;
+			}
+			thread_block(THREAD_CONTINUE_NULL);
+			gic_v3_spi_mask(MALI_JOB_GIC_INTID);
+			wr(mali, JOB_INT_MASK, 0);
+			if ((rd(mali, at) & mask) != 0) {
+				return (rd(mali, at) & mask) == want;
+			}
+			if (mach_absolute_time() >= deadline) {
+				return false;
+			}
+		}
+	}
 	while (mach_absolute_time() < deadline) {
-		if ((rd(mali, at) & mask) == want) {
-			return true;
+		if ((rd(mali, at) & mask) != 0) {
+			return (rd(mali, at) & mask) == want;
 		}
 		uint64_t nap;
 
