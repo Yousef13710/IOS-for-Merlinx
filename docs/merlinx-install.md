@@ -34,10 +34,11 @@ Complete guide to building and installing HakiOS (XNU 8796.121.2 / iOS 16.5) on 
 - **TWRP recovery** flashed to `recovery` (`mmcblk0p1`)
 
 ### Host (Linux x86_64)
-- `adb`, `fastboot`, `python3`, `git`, `clang`, `make`
-- Build dependencies from `./xnu-deps/setup.sh`
+- `adb`, `fastboot`, `python3` (with `venv`), `git`, `curl`, `tar`, `xz`, `make`, `cc`, `clang`, `lld` (or run `./tools/get-zig.sh`), `flex`, `bison`, `m4`, `perl`, `autoconf`, `automake`, `meson`, `ninja`, `llvm-ar`, `7zz`/`7z`
+- **Theos** (`$THEOS`, default `~/theos`) with its Linux toolchain (`toolchain/linux/iphone`) and `sdks/iPhoneOS16.5.sdk`
+- Optional for USB tools on host: `usbmuxd` and `libimobiledevice` (`idevice_id`, `idevicepair`, `ideviceinfo`, `idevicediagnostics`)
 - An iOS 16.5 IPSW (downloaded automatically via `./ios165/fetch.sh`) to generate `userland/root.apfs` and `userland/system.apfs` (`xnusys`) — no Apple binaries are included in this repo
-- `prebuilt/loader.efi` (included in this repo) and a stock `merlinx` `boot.img` (used as the Android boot container for `tools/chainboot.py` — you can pull it from your phone in TWRP before flashing: `adb shell dd if=/dev/block/by-name/boot of=/tmp/stock_boot.img && adb pull /tmp/stock_boot.img`)
+- `prebuilt/loader.efi` (included in this repo) and a stock `merlinx` `boot.img` (used as the Android boot container for `tools/chainboot.py` — pull it from your phone in TWRP before flashing: `adb shell dd if=/dev/block/by-name/boot of=/tmp/stock_boot.img && adb pull /tmp/stock_boot.img`)
 
 ---
 
@@ -65,17 +66,24 @@ cd hakios
 ```
 This downloads and extracts the iOS 16.5 rootfs, cryptexes, and `dyld_shared_cache` into `ios165/` (resumable if interrupted).
 
-### B. Sync XNU files & build the kernel
+### B. Apply XNU patches, set up `xnu-deps`, & build the kernel
 > [!IMPORTANT]
 > `xnu/files/...` are copied (not symlinked) into `xnu-src/xnu-8796.121.2/`. Whenever you edit files under `xnu/files/`, copy them into `xnu-src/xnu-8796.121.2/` (or run `./xnu/apply.sh`) before building.
 
 ```bash
 cd hakios
-./xnu/apply.sh   # or cp modified files from xnu/files/ into xnu-src/xnu-8796.121.2/
+./xnu/apply.sh          # fetches Apple's xnu-8796.121.2 and applies redwood.patch + xnu/files/
+./xnu-deps/setup.sh     # fetches/builds SDK, AvailabilityVersions, libdispatch, libpthread, host tools
 ./xnu-build.sh -j8 -k
 ```
 
-### C. Build userland (`root.apfs` + `system.apfs` for `xnusys`)
+### C. Build Mesa Panfrost (`libOSMesa.8.dylib` for `GL=1`)
+```bash
+cd hakios
+DRIVERS="softpipe,panfrost" bash tools/mk-mesa.sh
+```
+
+### D. Build userland (`root.apfs` + `system.apfs` for `xnusys`)
 ```bash
 cd hakios/userland
 DRIVERS="softpipe,panfrost" GL=1 WIFID=1 RC=rc.launchd.aks \
@@ -87,11 +95,11 @@ This builds **both**:
 - `userland/root.apfs` (init, launchd jobs, shims — embedded in `boot.img`)
 - `userland/system.apfs` (the 4 GiB-compatible APFS iOS system image to flash to `xnusys`)
 
-### D. Build `payload.bin`, `mtkloader.bin`, and `boot-step7-storage.img`
+### E. Build `payload.bin`, `mtkloader.bin`, and `boot-ios.img`
 ```bash
 cd hakios
 python3 xnuloader/mkpayload.py \
-  -o payload-step7-storage.bin \
+  -o payload.bin \
   kernel=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837 \
   loader=prebuilt/loader.efi \
   ramdisk=userland/root.apfs
@@ -103,8 +111,8 @@ bash mtkloader/build.sh \
 python3 tools/chainboot.py \
   stock_boot.img \
   mtkloader/mtkloader.bin \
-  boot-step7-storage.img \
-  payload-step7-storage.bin
+  boot-ios.img \
+  payload.bin
 ```
 *(To build a RAM-only `/private/var` image for faster ~2 min non-persistent boots, add `no_ext2=1` to `XNU_EXTRA_ARGS`.)*
 
@@ -120,18 +128,18 @@ bash tools/install-merlinx.sh \
   --repartition \
   --format-iosdata \
   --xnusys userland/system.apfs \
-  --boot boot-step7-storage.img \
+  --boot boot-ios.img \
   --reboot
 ```
 
 ### Updating only the kernel / `boot.img` (keeps existing `iosdata` & `xnusys`)
 ```bash
-bash tools/install-merlinx.sh --boot boot-step7-storage.img --reboot
+bash tools/install-merlinx.sh --boot boot-ios.img --reboot
 ```
 
 ### Wiping & reformatting `iosdata` only
 ```bash
-bash tools/install-merlinx.sh --format-iosdata --boot boot-step7-storage.img --reboot
+bash tools/install-merlinx.sh --format-iosdata --boot boot-ios.img --reboot
 ```
 
 ---
@@ -143,8 +151,10 @@ bash tools/install-merlinx.sh --format-iosdata --boot boot-step7-storage.img --r
   adb pull /sys/fs/pstore/console-ramoops-2
   adb pull /sys/fs/pstore/pmsg-ramoops-0
   ```
-- Inspect `/private/var` (`iosdata`) offline in TWRP:
+- Inspect or repair `/private/var` (`iosdata`) offline in TWRP (for example after a forced `Vol+ + Power` reboot):
   ```bash
+  adb shell "e2fsck -y /dev/block/by-name/iosdata"
   adb shell "mkdir -p /tmp/ios && mount -t ext2 -o ro /dev/block/by-name/iosdata /tmp/ios && ls -la /tmp/ios; umount /tmp/ios"
   ```
+- Prefer `idevicediagnostics restart` over USB for clean warm reboots (`TOPRGU_SWRST`) so `ext2` stays clean.
 - See [merlinx-bringup-notes.md](merlinx-bringup-notes.md) for full technical details of all kernel, eMMC, `ext2`, Mali, CONNSYS, and camera fixes.

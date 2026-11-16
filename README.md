@@ -37,15 +37,20 @@ Unlike the temporary dual-boot `Infinix Hot 20` setup, this `merlinx` port repla
 
 Nothing of Apple's and no vendor firmware is in this repository. You fetch the official iOS 16.5 (20F66) IPSW yourself using `./ios165/fetch.sh` and build `userland/root.apfs` + `userland/system.apfs` locally. Your stock `merlinx` `boot.img` can be backed up directly from TWRP before flashing.
 
-## Quick Build & Install
+## Quick Build & Install (for Beginners)
 
-See **[docs/merlinx-install.md](docs/merlinx-install.md)** for full step-by-step instructions:
+See **[docs/merlinx-install.md](docs/merlinx-install.md)** for the full step-by-step guide, prerequisites (Linux host, Theos + `iPhoneOS16.5.sdk`, TWRP on `merlinx`, stock `boot.img` backup), and troubleshooting.
 
-1. `./ios165/fetch.sh` — download & extract iOS 16.5 (20F66)
-2. `./xnu/apply.sh && ./xnu-build.sh -j8 -k` — build XNU kernel
-3. `cd userland && ... bash build.sh` — build `root.apfs` and `system.apfs` (`xnusys`)
-4. `xnuloader/mkpayload.py` + `mtkloader/build.sh` + `tools/chainboot.py` — build `boot-step7-storage.img`
-5. `bash tools/install-merlinx.sh --repartition --format-iosdata --xnusys userland/system.apfs --boot boot-step7-storage.img --reboot` — partition, format `ext2`, and flash via TWRP ADB
+1. `./ios165/fetch.sh` — download & extract iOS 16.5 (20F66) from Apple's IPSW
+2. `./xnu/apply.sh && ./xnu-deps/setup.sh` — apply XNU patches & fetch/build kernel SDK + deps
+3. `./xnu-build.sh -j8 -k` — build the XNU kernel
+4. `DRIVERS="softpipe,panfrost" bash tools/mk-mesa.sh` — build Mesa Panfrost (`libOSMesa.8.dylib`) for GPU acceleration
+5. `cd userland && DRIVERS="softpipe,panfrost" GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd com.apple.mobile.lockdown com.apple.timed" OSLOG="" bash build.sh` — build `root.apfs` & `system.apfs` (`xnusys`)
+6. `python3 xnuloader/mkpayload.py ...` + `bash mtkloader/build.sh ...` + `python3 tools/chainboot.py ...` — pack `boot-ios.img`
+7. `bash tools/install-merlinx.sh --repartition --format-iosdata --xnusys userland/system.apfs --boot boot-ios.img --reboot` — partition, format `ext2`, and flash via TWRP ADB
+
+> [!TIP]
+> Always use `idevicediagnostics restart` (over USB) for clean reboots instead of holding Power/Volume keys so the persistent `ext2` (`iosdata`) partition stays clean.
 
 ## License and legal
 
