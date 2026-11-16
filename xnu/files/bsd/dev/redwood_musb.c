@@ -438,6 +438,7 @@ musb_service(void)
 		ep0_tx_ptr = NULL;
 		ep0_tx_len = 0;
 		tx_busy = false;
+		rx_head = rx_tail = 0;
 		wr8(MUSB_FADDR, 0);
 		usb_hs = (rd8(MUSB_POWER) & MUSB_POWER_HSMODE) != 0;
 		ep1_configure();
@@ -553,6 +554,19 @@ usb_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
 		fifo_write(1, buf, (uint16_t)chunk);
 		wr16(MUSB_TXCSR(1), MUSB_TXCSR_MODE | MUSB_TXCSR_TXPKTRDY);
 		stat_tx_pkts++;
+		if (uio_resid(uio) == 0 && chunk == mps) {
+			int zwaits = 0;
+			while (usb_cfg != 0 && (rd16(MUSB_TXCSR(1)) & MUSB_TXCSR_TXPKTRDY)) {
+				struct timespec ts = { .tv_sec = 0, .tv_nsec = 10 * NSEC_PER_MSEC };
+				int zerr = msleep(&tx_wait_chan, musb_mtx, PCATCH | PSOCK, "usbzlp", &ts);
+				if (zerr != 0 && zerr != EWOULDBLOCK) break;
+				if (zerr == EWOULDBLOCK && ++zwaits >= 50) break;
+			}
+			if (usb_cfg != 0 && !(rd16(MUSB_TXCSR(1)) & MUSB_TXCSR_TXPKTRDY)) {
+				wr16(MUSB_TXCSR(1), MUSB_TXCSR_MODE | MUSB_TXCSR_TXPKTRDY);
+				stat_tx_pkts++;
+			}
+		}
 		lck_mtx_unlock(musb_mtx);
 	}
 	return err;

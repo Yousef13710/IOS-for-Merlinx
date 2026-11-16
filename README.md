@@ -14,7 +14,7 @@ Unlike the temporary dual-boot `Infinix Hot 20` setup, this `merlinx` port repla
 - **Graphics & Display** — In-kernel Mali-G52 driver (`bsd/dev/redwood_mali.c`, **1050 MHz** OC via `mali_mhz=1050`), Mesa **panfrost** (`-O3` + persistent on-disk shader cache in `/private/var/tmp/mesa_cache`), and Metal (`userland/src/redwoodmetal.m`), with tear-free double-buffered page flipping (`fb_flip=1`, `fbscale=2 fbfit=1 fb_threads=4 fb_beat=0 vblur=0`).
 - **Input** — Novatek touchscreen (`bsd/dev/redwood_nvt.c`, `touchscreen=3`), power and volume buttons (`buttons=2`, `bsd/dev/redwood_mtkkeys.c`).
 - **Wi-Fi & Time Sync** — CONNSYS (`connsys_step=17`, `WIFID=1`) + `com.apple.timed`: scans, joins, and authenticates on both Open and WPA2 networks (2.4 GHz & 5 GHz, fixed management TX rate), acquires DHCP on `en0`, passes DNS/TCP/UDP traffic, and syncs system time over NTP.
-- **Bluetooth** — `connsys_bt=2` brings up the Skywalk kernel pipe; `bluetoothd` currently hits `reason=130` on `IOS_JOBS` (under investigation).
+- **Bluetooth** — `connsys_bt=2` + `bluetoothd` + `BlueTool` + `securityd`/`keybagd` (`aks_keys=1`, `rc.launchd.aks`): Skywalk kernel pipe + HCI up, Settings → Bluetooth opens and stays on.
 - **Rear Camera** — `s5kgm1sp` (`mtkcam_skel=1`, `bsd/dev/redwood_mtkcam_skel.c`): streams live frames in `Camera.app` (currently laggy/tearing; front camera not yet ported).
 - **Battery** — Real battery percentage in the status bar (`mtkbatt=1`, `bsd/dev/redwood_mtkbatt.c`).
 - **Apps & Shell** — Settings, Clock, Calendar, Photos, Notes, Camera, widgets, SSH by key.
@@ -22,7 +22,6 @@ Unlike the temporary dual-boot `Infinix Hot 20` setup, this `merlinx` port repla
 **Known limitations / not yet working:**
 - **Laggy UI / apps** and **no wallpaper** currently
 - **Safari / WebKit** stays blank/unresponsive despite working Wi-Fi/DNS/TCP
-- **Bluetooth** (`bluetoothd` restart loop `reason=130`)
 - **Extra USB services** (`afcd`, `os_trace_relay`, `mobile_installation_proxy`) not yet enabled in `MORE_JOBS`
 - **`Settings → General → About`** crashes `Preferences`
 - **Not ported / unsupported:** front camera, speakers/mic audio, cellular/baseband, `ext4` (`iosdata` is `ext2`), and Apple online services (activation, Apple ID, iCloud, App Store — no Secure Enclave).

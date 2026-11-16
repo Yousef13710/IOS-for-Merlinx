@@ -10,16 +10,17 @@ Complete guide to building and installing HakiOS (XNU 8796.121.2 / iOS 16.5) on 
 ## 1. Current Status (`merlinx`)
 
 - **Works:**
-  - 8-core SMP (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1700 MHz), Mali-G52 @ 1050 MHz (`GL=1` / Mesa Panfrost, `mali_mhz=1050`), tear-free double-buffered display (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1`).
+  - 8-core SMP (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1800 MHz via `mtk_cpufreq=3`), Mali-G52 @ 1050 MHz (`GL=1` / Mesa Panfrost, `mali_mhz=1050`), tear-free double-buffered display (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1`).
+  - USB (`redwood_musb.c`, `mtk_usb=1`, `05ac:12a8` HS 480 Mbps) + `usbmux_relay` + `lockdownd` pairing (`idevice_id`, `idevicepair`, `ideviceinfo`, `idevicedate`, `idevicediagnostics restart` via `TOPRGU_SWRST`).
   - Touchscreen (`redwood_nvt.c`), power & volume buttons (`buttons=2`), battery gauge (`mtkbatt=1`).
   - Bluetooth (`connsys_bt=2`, `bluetoothd`, `BlueTool` — Settings → Bluetooth works and stays on).
-  - Wi-Fi scanning/network discovery (`connsys_step=17`, `WIFID=1`).
+  - Wi-Fi & NTP time sync (`connsys_step=17`, `WIFID=1`, `com.apple.timed`): scans, joins, and authenticates on Open & WPA2 networks (2.4 GHz & 5 GHz), DHCP, DNS, TCP/UDP, NTP.
   - Rear camera (`s5kgm1sp`, `mtkcam_skel=1`, live preview in `Camera.app`, currently laggy/tearing).
   - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, ~51.9 GiB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, 128 KB coalesced flushes, per-inode `fsync`, and 32 KB read-ahead (**~2.5–3 min boot** [`~2 min 40 s` measured]; un-chopped icons, widgets).
   - Optional RAM-only `/private/var` mode (`no_ext2=1` boot-arg, ~2 min boot, non-persistent).
 - **Known Limitations:**
   - **Laggy UI / apps** and **no wallpaper** currently.
-  - **Wi-Fi:** Discovers nearby networks, but **does not connect/associate** yet.
+  - **Safari / WebKit:** Stays blank/unresponsive despite working Wi-Fi/DNS/TCP.
   - **`Settings → General → About`:** Currently crashes `Preferences`.
   - **Not ported / unsupported:** Front camera, speakers/mic audio, cellular/baseband, `ext4` (use `ext2` for `iosdata`), and Apple online services (iCloud/App Store/activation).
 
@@ -78,7 +79,7 @@ cd hakios
 ```bash
 cd hakios/userland
 DRIVERS="softpipe,panfrost" GL=1 WIFID=1 RC=rc.launchd.aks \
-  MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd" \
+  MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd com.apple.mobile.lockdown com.apple.timed" \
   OSLOG="" \
   bash build.sh
 ```
@@ -97,7 +98,7 @@ python3 xnuloader/mkpayload.py \
 
 bash mtkloader/build.sh \
   -DXNU_CORES=8 -DXNU_VERBOSE=0 \
-  -D'XNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 mali=1 mali_mhz=1050 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 fb_beat=0 vblur=0 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1"'
+  -D'XNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 a75_mhz=2000 a55_mhz=1800 mali=1 mali_mhz=1050 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 fb_beat=0 vblur=0 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1 mtk_usb=1"'
 
 python3 tools/chainboot.py \
   stock_boot.img \
