@@ -156,6 +156,7 @@ struct ext2_node {
 	struct ext2_inode   en_di;
 	bool                en_dirty;
 	uint32_t            en_parent_ino;
+	uint32_t            en_last_blk;
 	char                en_name[256];
 };
 
@@ -658,13 +659,42 @@ ext2_sync_node(struct ext2_node *node)
 /* ---- Bitmap Allocators ---- */
 
 static int
-ext2_alloc_block(struct ext2_mount *em, uint32_t pref_grp, uint32_t *out_blk)
+ext2_alloc_block_hint(struct ext2_mount *em, uint32_t pref_grp, uint32_t pref_blk, uint32_t *out_blk)
 {
 	uint8_t *bmap = em->em_bmap_buf;
 	uint32_t g;
 
 	if (em->em_sb.s_free_blocks_count == 0) {
 		return ENOSPC;
+	}
+	/* Fast path: try the requested contiguous block first for 128 KB eMMC batching */
+	if (pref_blk >= em->em_sb.s_first_data_block && pref_blk < em->em_sb.s_blocks_count) {
+		uint32_t rel = pref_blk - em->em_sb.s_first_data_block;
+		uint32_t pg = rel / em->em_sb.s_blocks_per_group;
+		uint32_t idx = rel % em->em_sb.s_blocks_per_group;
+		if (pg < em->em_ngroups && em->em_gd[pg].bg_free_blocks_count > 0 &&
+		    ext2_read_block(em, em->em_gd[pg].bg_block_bitmap, bmap) == 0) {
+			uint32_t byte = idx >> 3;
+			uint8_t mask = (uint8_t)(1u << (idx & 7));
+			if (!(bmap[byte] & mask)) {
+				bmap[byte] |= mask;
+				if (ext2_write_block(em, em->em_gd[pg].bg_block_bitmap, bmap) != 0) {
+					return EIO;
+				}
+				if (em->em_grp_hint) {
+					em->em_grp_hint[pg] = (uint16_t)byte;
+				}
+				em->em_gd[pg].bg_free_blocks_count--;
+				em->em_sb.s_free_blocks_count--;
+				em->em_gd_dirty = true;
+				em->em_sb_dirty = true;
+				*out_blk = pref_blk;
+				return 0;
+			}
+		}
+		if (pg < em->em_ngroups) {
+			pref_grp = pg;
+		}
 	}
 	for (uint32_t pass = 0; pass < em->em_ngroups; pass++) {
 		g = (pref_grp + pass) % em->em_ngroups;
@@ -686,7 +716,32 @@ ext2_alloc_block(struct ext2_mount *em, uint32_t pref_grp, uint32_t *out_blk)
 		for (uint32_t phase = 0; phase < 2; phase++) {
 			uint32_t begin = (phase == 0) ? start_byte : 0;
 			uint32_t end = (phase == 0) ? ((limit + 7) / 8) : start_byte;
-			for (uint32_t byte = begin; byte < end; byte++) {
+			uint32_t byte = begin;
+			while (byte + 8 <= end && ((uintptr_t)(bmap + byte) & 7) == 0) {
+				uint64_t w = *(const uint64_t *)(bmap + byte);
+				if (w != ~0ULL) {
+					int bit64 = __builtin_ctzll(~w);
+					uint32_t rel_bit = byte * 8 + (uint32_t)bit64;
+					if (rel_bit < limit) {
+						uint32_t b_idx = rel_bit >> 3;
+						bmap[b_idx] |= (uint8_t)(1u << (rel_bit & 7));
+						if (ext2_write_block(em, em->em_gd[g].bg_block_bitmap, bmap) != 0) {
+							return EIO;
+						}
+						if (em->em_grp_hint) {
+							em->em_grp_hint[g] = (uint16_t)b_idx;
+						}
+						em->em_gd[g].bg_free_blocks_count--;
+						em->em_sb.s_free_blocks_count--;
+						em->em_gd_dirty = true;
+						em->em_sb_dirty = true;
+						*out_blk = grp_start + rel_bit;
+						return 0;
+					}
+				}
+				byte += 8;
+			}
+			for (; byte < end; byte++) {
 				if (bmap[byte] == 0xff) {
 					continue;
 				}
@@ -712,6 +767,12 @@ ext2_alloc_block(struct ext2_mount *em, uint32_t pref_grp, uint32_t *out_blk)
 		}
 	}
 	return ENOSPC;
+}
+
+static int
+ext2_alloc_block(struct ext2_mount *em, uint32_t pref_grp, uint32_t *out_blk)
+{
+	return ext2_alloc_block_hint(em, pref_grp, 0, out_blk);
 }
 
 static void
@@ -903,7 +964,8 @@ ext2_bmap(struct ext2_node *node, uint64_t lbn, bool alloc, bool zero_new, uint3
 	if (lbn < EXT2_NDIR_BLOCKS) {
 		uint32_t blk = node->en_di.i_block[lbn];
 		if (blk == 0 && alloc) {
-			int error = ext2_alloc_block(em, pref, &blk);
+			uint32_t hint = node->en_last_blk ? node->en_last_blk + 1 : 0;
+			int error = ext2_alloc_block_hint(em, pref, hint, &blk);
 			if (error) {
 				return error;
 			}
@@ -916,6 +978,7 @@ ext2_bmap(struct ext2_node *node, uint64_t lbn, bool alloc, bool zero_new, uint3
 			}
 			node->en_di.i_block[lbn] = blk;
 			node->en_di.i_blocks += EXT2_BLK_SIZE / 512u;
+			node->en_last_blk = blk;
 			node->en_dirty = true;
 		}
 		*out_blk = blk;
@@ -1658,7 +1721,8 @@ ext2_getattr(struct vnop_getattr_args *ap)
 	VATTR_RETURN(vap, va_flags, 0);
 	VATTR_RETURN(vap, va_gen, node->en_di.i_generation);
 	VATTR_RETURN(vap, va_linkid, node->en_ino);
-	VATTR_RETURN(vap, va_parentid, node->en_parent_ino);
+	VATTR_RETURN(vap, va_parentid,
+	    node->en_parent_ino ? node->en_parent_ino : (node->en_ino == EXT2_ROOT_INO ? 1 : 0));
 	VATTR_RETURN(vap, va_filerev, 0);
 	if (VATTR_IS_ACTIVE(vap, va_name)) {
 		if (node->en_ino == EXT2_ROOT_INO) {
@@ -2927,6 +2991,11 @@ ext2_vfs_getattr(mount_t mp, struct vfs_attr *fsap, __unused vfs_context_t ctx)
 	uint64_t free_b = em->em_sb.s_free_blocks_count;
 	uint64_t total_i = em->em_sb.s_inodes_count;
 	uint64_t free_i = em->em_sb.s_free_inodes_count;
+	struct vfsstatfs *sp = vfs_statfs(mp);
+	sp->f_bfree = free_b;
+	sp->f_bavail = free_b;
+	sp->f_bused = total_b - free_b;
+	sp->f_ffree = free_i;
 	lck_mtx_unlock(&em->em_lock);
 
 	VFSATTR_RETURN(fsap, f_objcount, total_i - free_i);

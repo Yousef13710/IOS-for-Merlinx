@@ -37,7 +37,7 @@ static vm_offset_t toprgu_va;
 static int
 mtk_halt_restart(unsigned int type)
 {
-	if ((type == 1 /* kPERestartCPU */ || type == 5 /* kPEPanicRestartCPU */) && toprgu_va != 0) {
+	if ((type == 0 /* kPEHaltCPU */ || type == 1 /* kPERestartCPU */ || type == 5 /* kPEPanicRestartCPU */) && toprgu_va != 0) {
 		*(volatile uint32_t *)(toprgu_va + MTK_TOPRGU_SWRST) = MTK_TOPRGU_SWRST_KEY;
 		__asm__ volatile("dsb sy; isb" ::: "memory");
 		for (;;) {
