@@ -26,6 +26,26 @@
 static uint32_t touch_lat = 2;          /* 2: not yet looked up */
 
 extern void loader_log_line(const char *line);
+extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+extern int (*PE_halt_restart)(unsigned int type);
+
+#define MTK_TOPRGU_PHYS     0x10007000
+#define MTK_TOPRGU_SWRST    0x14
+#define MTK_TOPRGU_SWRST_KEY 0x1209u
+static vm_offset_t toprgu_va;
+
+static int
+mtk_halt_restart(unsigned int type)
+{
+	if ((type == 1 /* kPERestartCPU */ || type == 5 /* kPEPanicRestartCPU */) && toprgu_va != 0) {
+		*(volatile uint32_t *)(toprgu_va + MTK_TOPRGU_SWRST) = MTK_TOPRGU_SWRST_KEY;
+		__asm__ volatile("dsb sy; isb" ::: "memory");
+		for (;;) {
+			__asm__ volatile("wfe");
+		}
+	}
+	return -1;
+}
 
 /*
  * A "tl:" line, for the kernel's drivers: into the loader's log as it is written -- the kernel's own
@@ -222,6 +242,12 @@ redwood_input_init(void)
 	redwood_buttons_init();
 	redwood_mtkkeys_init();
 	redwood_musb_init();
+	if (toprgu_va == 0) {
+		toprgu_va = ml_io_map(MTK_TOPRGU_PHYS, 0x1000);
+	}
+	if (toprgu_va != 0 && PE_halt_restart == NULL) {
+		PE_halt_restart = mtk_halt_restart;
+	}
 	redwood_battery_init();
 	redwood_ufs_init();
 	redwood_net_init();
