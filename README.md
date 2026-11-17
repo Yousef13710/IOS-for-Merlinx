@@ -80,3 +80,11 @@ For manual build/flash commands and troubleshooting, see **[docs/merlinx-install
 - **[hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel)** — Upstream HakiOS repository (`X6826B`)
 
 No Apple binaries or vendor firmware are hosted in this repository (`./ios165/fetch.sh` downloads the official IPSW during setup). XNU patches are under the **Apple Public Source License 2.0**; original loader, driver, and userland code is under **MIT**. Not affiliated with or endorsed by Apple.
+
+---
+
+## Support the Project
+
+If this project helped you or you'd like to support further `merlinx` development:
+
+- **USDC (Solana network · Phantom):** `77Rcq3eVp1vHVyBNgyB4zGGPwbJGa9C5wek5L4MMBsgy`
