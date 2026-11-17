@@ -100,6 +100,9 @@ check_host() {
 			missing_pkgs+=("$c")
 		fi
 	done
+	if ! command -v "${LDID:-ldid}" >/dev/null 2>&1; then
+		missing_pkgs+=("${LDID:-ldid} (iOS code signer)")
+	fi
 
 	if ! command -v 7zz >/dev/null 2>&1 && ! command -v 7z >/dev/null 2>&1; then
 		missing_pkgs+=("7zz/p7zip")
@@ -112,6 +115,7 @@ check_host() {
 		echo "Install them first:"
 		echo "  Debian/Ubuntu: sudo apt update && sudo apt install -y adb python3 python3-venv git curl tar xz-utils build-essential clang lld flex bison m4 perl autoconf automake meson ninja-build llvm 7zip"
 		echo "  Arch Linux:    sudo pacman -S --needed android-tools python git curl tar xz base-devel clang lld flex bison m4 perl autoconf automake meson ninja llvm 7zip"
+		echo "  Install ldid separately, or set LDID to a compatible signing executable."
 		return 1
 	fi
 	ok "Core build tools present"

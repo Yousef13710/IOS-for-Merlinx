@@ -250,9 +250,7 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			{ ${LDID:-ldid} -Ssrc/wifipw_test.entitlements obj/wifipw_test 2>/dev/null ||
 			  echo "build.sh: no ldid: wifipw_test is unsigned, and the keychain will refuse it (-34018)"; }
 		# (aks_restore makes /private/var/keybags/systembag.kb before launchd for keybagd/bluetoothd)
-		$DYN -framework CoreFoundation -framework IOKit -o obj/aks_restore src/aks_restore.c &&
-			{ ${LDID:-ldid} -Ssrc/aks_restore.entitlements obj/aks_restore 2>/dev/null ||
-			  echo "build.sh: no ldid: aks_restore is unsigned"; }
+		$DYN -framework CoreFoundation -framework IOKit -o obj/aks_restore src/aks_restore.c
 		# our library for inside stock iOS programs (the jobs in INJECT are started with it)
 		$DYN -dynamiclib -install_name /redwood/lib/libredwood.dylib -framework CoreFoundation -framework IOKit -lobjc \
 			-o obj/libredwood.dylib src/inject.c
@@ -320,7 +318,20 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 	[ -f obj/battery_test ] && cp obj/battery_test root/bin/
 	[ -f obj/keychain_test ] && cp obj/keychain_test root/bin/
 	[ -f obj/wifipw_test ] && cp obj/wifipw_test root/bin/
-	[ -f obj/aks_restore ] && cp obj/aks_restore root/bin/
+	if [ -f obj/aks_restore ]; then
+		cp obj/aks_restore root/bin/
+		if ! "${LDID:-ldid}" -Ssrc/aks_restore.entitlements root/bin/aks_restore; then
+			case "${RC:-rc.launchd}" in
+				*rc.launchd.aks|*rc.launchd.metalaks)
+					echo "build.sh: signing aks_restore failed; this boot configuration requires its keystore entitlement" >&2
+					exit 1 ;;
+				*) echo "build.sh: warning: signing aks_restore failed" >&2 ;;
+			esac
+		fi
+	elif [ "${RC:-rc.launchd}" = rc.launchd.aks ] || [ "${RC:-rc.launchd}" = rc.launchd.metalaks ]; then
+		echo "build.sh: aks_restore is missing; this boot configuration requires it" >&2
+		exit 1
+	fi
 	[ -f obj/tolog ] && cp obj/tolog root/bin/
 	[ -f obj/usbmux_relay ] && cp obj/usbmux_relay root/bin/
 	[ -f obj/sound_test ] && cp obj/sound_test root/bin/

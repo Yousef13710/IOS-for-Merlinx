@@ -45,6 +45,7 @@ The ASCII TUI installer checks your host tools and recovery connection, guides y
 ### Host (Linux x86_64)
 - `adb`, `fastboot`, `python3` (with `venv`, `Pillow`, and `numpy`), `heif-convert` (`libheif-examples`, for rendering the `750x1624` `WWDC 2022` wallpaper), `git`, `curl`, `tar`, `xz`, `make`, `cc`, `clang`, `lld` (or run `./tools/get-zig.sh`), `flex`, `bison`, `m4`, `perl`, `autoconf`, `automake`, `meson`, `ninja`, `llvm-ar`, `7zz`/`7z`
 - **Theos** (`$THEOS`, default `~/theos`) with its Linux toolchain (`toolchain/linux/iphone`) and `sdks/iPhoneOS16.5.sdk`
+- `ldid` on `PATH` (or `LDID` set to a compatible signer), required to sign the keybag helper. A signing failure stops the installer before an image is flashed.
 - Optional for USB tools on host: `usbmuxd` and `libimobiledevice` (`idevice_id`, `idevicepair`, `ideviceinfo`, `idevicediagnostics`)
 - An iOS 16.5 IPSW (downloaded automatically via `./ios165/fetch.sh`) to generate `userland/root.apfs` and `userland/system.apfs` (`xnusys`) — no Apple binaries are included in this repo
 - `prebuilt/loader.efi` (included in this repo) and a stock `merlinx` `boot.img` (used as the Android boot container for `tools/chainboot.py` — pull it from your phone in TWRP before flashing: `adb shell dd if=/dev/block/by-name/boot of=/tmp/stock_boot.img && adb pull /tmp/stock_boot.img`)
