@@ -82,18 +82,41 @@ run_step() {
 	fi
 }
 
+ADB_BIN="${ADB_BIN:-}"
+if [ -z "$ADB_BIN" ]; then
+	if command -v adb >/dev/null 2>&1 && { ! grep -qi microsoft /proc/version 2>/dev/null || adb devices 2>/dev/null | awk 'NR>1 && NF>=2' | grep -q .; }; then
+		ADB_BIN="adb"
+	elif grep -qi microsoft /proc/version 2>/dev/null && command -v adb.exe >/dev/null 2>&1; then
+		ADB_BIN="adb.exe"
+	elif grep -qi microsoft /proc/version 2>/dev/null && [ -x "$ROOT/.win-tools/platform-tools/adb.exe" ]; then
+		ADB_BIN="$ROOT/.win-tools/platform-tools/adb.exe"
+	else
+		ADB_BIN="adb"
+	fi
+fi
+export ADB_BIN
+
+adb_host_path() {
+	if [[ "$ADB_BIN" == *.exe ]] && command -v wslpath >/dev/null 2>&1; then
+		wslpath -w "$1"
+	else
+		printf '%s' "$1"
+	fi
+}
+
 adb_cmd() {
 	if [ -n "$ADB_SERIAL" ]; then
-		adb -s "$ADB_SERIAL" "$@"
+		"$ADB_BIN" -s "$ADB_SERIAL" "$@"
 	else
-		adb "$@"
+		"$ADB_BIN" "$@"
 	fi
 }
 
 # 1. Host & Toolchain Preflight
 check_host() {
 	local missing_pkgs=()
-	local cmds=(adb python3 git curl tar xz make cc clang flex bison m4 perl autoconf automake meson ninja llvm-ar)
+	local cmds=(python3 git curl tar xz make cc clang flex bison m4 perl autoconf automake meson ninja llvm-ar)
+	[[ "$ADB_BIN" == *.exe ]] || cmds=(adb "${cmds[@]}")
 	local c
 	for c in "${cmds[@]}"; do
 		if ! command -v "$c" >/dev/null 2>&1; then
@@ -154,7 +177,7 @@ connect_recovery() {
 	info "Looking for a phone booted into recovery with root ADB (TWRP, OrangeFox, PitchBlack, SHRP, Lineage, etc.)..."
 	while true; do
 		local lines
-		lines=$(adb devices 2>/dev/null | awk 'NR>1 && NF>=2 {print $1 "\t" $2}')
+		lines=$("$ADB_BIN" devices 2>/dev/null | awk 'NR>1 && NF>=2 {print $1 "\t" $2}')
 		if [ -z "$lines" ]; then
 			warn "No ADB device detected."
 			echo "  1. Boot your Redmi Note 9 (merlinx) into your custom recovery (hold Vol+ + Power)."
@@ -248,7 +271,7 @@ prepare_boot_container() {
 	connect_recovery || return 1
 	TMP_BOOT_CONTAINER=$(mktemp /tmp/hakios_boot_container.XXXXXX.img)
 	adb_cmd shell "dd if=/dev/block/by-name/boot of=/tmp/dev_boot.img bs=4M 2>/dev/null"
-	adb_cmd pull /tmp/dev_boot.img "$TMP_BOOT_CONTAINER" >/dev/null
+	adb_cmd pull /tmp/dev_boot.img "$(adb_host_path "$TMP_BOOT_CONTAINER")" >/dev/null
 	adb_cmd shell "rm -f /tmp/dev_boot.img" >/dev/null || true
 
 	if python3 -c "

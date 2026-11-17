@@ -52,9 +52,28 @@ if [ -z "$BOOT_IMG" ] && [ -z "$XNUSYS_IMG" ] && [ "$DO_REPART" -eq 0 ] && [ "$D
 	exit 1
 fi
 
-ADB=(adb)
+ADB_BIN="${ADB_BIN:-}"
+if [ -z "$ADB_BIN" ]; then
+	if command -v adb >/dev/null 2>&1 && { ! grep -qi microsoft /proc/version 2>/dev/null || adb devices 2>/dev/null | awk 'NR>1 && NF>=2' | grep -q .; }; then
+		ADB_BIN="adb"
+	elif grep -qi microsoft /proc/version 2>/dev/null && command -v adb.exe >/dev/null 2>&1; then
+		ADB_BIN="adb.exe"
+	else
+		ADB_BIN="adb"
+	fi
+fi
+
+adb_host_path() {
+	if [[ "$ADB_BIN" == *.exe ]] && command -v wslpath >/dev/null 2>&1; then
+		wslpath -w "$1"
+	else
+		printf '%s' "$1"
+	fi
+}
+
+ADB=("$ADB_BIN")
 if [ -n "$ADB_SERIAL" ]; then
-	ADB=(adb -s "$ADB_SERIAL")
+	ADB=("$ADB_BIN" -s "$ADB_SERIAL")
 fi
 
 run_adb() {
@@ -140,7 +159,7 @@ print(iosdata_start, iosdata_end, xnusys_start, xnusys_end, desc)
 	BACKUP="gpt_backup_merlinx_$(date +%Y%m%d_%H%M%S).bin"
 	echo "== Backing up GPT to $BACKUP =="
 	run_adb shell "sgdisk --backup=/tmp/$BACKUP /dev/block/mmcblk0"
-	run_adb pull "/tmp/$BACKUP" "./$BACKUP"
+	run_adb pull "/tmp/$BACKUP" "$(adb_host_path "./$BACKUP")"
 	run_adb shell "rm -f /tmp/$BACKUP"
 
 	echo "== Repartitioning /dev/block/mmcblk0 =="
@@ -172,7 +191,7 @@ if [ -n "$XNUSYS_IMG" ]; then
 		SEEK_4M=0
 		for part in "$TMP_SPLIT"/part_*; do
 			echo "  flashing $(basename "$part") at offset $((SEEK_4M * 4)) MiB..."
-			"${ADB[@]}" push "$part" /tmp/xnusys.part
+			"${ADB[@]}" push "$(adb_host_path "$part")" /tmp/xnusys.part
 			"${ADB[@]}" shell "dd if=/tmp/xnusys.part of=\"$XNUSYS_DEV\" bs=4M seek=$SEEK_4M conv=notrunc && rm -f /tmp/xnusys.part"
 			SEEK_4M=$((SEEK_4M + 128))
 		done
@@ -187,7 +206,7 @@ if [ -n "$BOOT_IMG" ]; then
 		exit 1
 	fi
 	echo "== Flashing $BOOT_IMG to /dev/block/by-name/boot =="
-	run_adb push "$BOOT_IMG" /tmp/boot.img
+	run_adb push "$(adb_host_path "$BOOT_IMG")" /tmp/boot.img
 	run_adb shell "dd if=/tmp/boot.img of=/dev/block/by-name/boot bs=4M && sync && rm -f /tmp/boot.img"
 fi
 
