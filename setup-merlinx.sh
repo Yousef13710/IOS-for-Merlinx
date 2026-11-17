@@ -368,10 +368,11 @@ EOF
 	bash "$ROOT/tools/install-merlinx.sh" \
 		--serial "$ADB_SERIAL" \
 		--repartition \
+		--yes \
 		--format-iosdata \
 		--xnusys "$ROOT/userland/system.apfs" \
 		--boot "$ROOT/boot-ios.img" \
-		--reboot
+		--reboot || { fail "Flashing/repartitioning failed! Keeping build files so you can retry."; return 1; }
 	echo ""
 	ok "Installation complete! First boot takes ~2 minutes."
 	echo "  Tip: For future reboots, use 'idevicediagnostics restart' over USB so ext2 stays clean."
@@ -417,7 +418,7 @@ action_update_boot() {
 	step_build_xnu || return 1
 	step_build_userland || return 1
 	step_pack_boot || return 1
-	bash "$ROOT/tools/install-merlinx.sh" --serial "$ADB_SERIAL" --boot "$ROOT/boot-ios.img" --reboot
+	bash "$ROOT/tools/install-merlinx.sh" --serial "$ADB_SERIAL" --boot "$ROOT/boot-ios.img" --reboot || { fail "Flashing boot-ios.img failed!"; return 1; }
 	ok "Updated boot-ios.img and rebooted!"
 }
 

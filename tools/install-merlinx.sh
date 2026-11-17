@@ -8,6 +8,7 @@ DO_REPART=0
 DO_FORMAT=0
 DO_REBOOT=0
 DRY_RUN=0
+YES_CONFIRMED=0
 ADB_SERIAL=""
 
 usage() {
@@ -21,6 +22,7 @@ Options:
   --format-iosdata      Format /dev/block/by-name/iosdata as ext2 (-b 4096 -L iosdata)
   --serial <id>         Target specific adb device serial
   --reboot              Reboot device after flashing
+  --yes                 Skip interactive --repartition confirmation
   --dry-run             Print actions without modifying the device
   -h, --help            Show this help
 
@@ -41,6 +43,7 @@ while [ $# -gt 0 ]; do
 		--format-iosdata) DO_FORMAT=1; shift ;;
 		--serial) ADB_SERIAL="$2"; shift 2 ;;
 		--reboot) DO_REBOOT=1; shift ;;
+		--yes) YES_CONFIRMED=1; shift ;;
 		--dry-run) DRY_RUN=1; shift ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "Unknown option: $1" >&2; usage; exit 1 ;;
@@ -130,7 +133,7 @@ print(iosdata_start, iosdata_end, xnusys_start, xnusys_end, desc)
 	echo "Detected eMMC: $DISK_DESC"
 	echo "WARNING: --repartition will DELETE Android 'super' (p43), 'cache' (p44), and 'userdata' (p45)"
 	echo "and create 'iosdata' (p43, ~${IOSDATA_GIB} GiB, sectors ${IOSDATA_START}..${IOSDATA_END}) and 'xnusys' (p48, 4.0 GiB, sectors ${XNUSYS_START}..${XNUSYS_END})."
-	if [ "$DRY_RUN" -eq 0 ]; then
+	if [ "$DRY_RUN" -eq 0 ] && [ "$YES_CONFIRMED" -eq 0 ]; then
 		read -r -p "Type YES to continue: " CONFIRM
 		if [ "$CONFIRM" != "YES" ]; then
 			echo "Aborted."
