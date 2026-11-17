@@ -45,31 +45,29 @@ Captured directly from a Redmi Note 9 (`merlinx`) over USB using `idevicescreens
 
 ### Requirements
 - **Phone:** Xiaomi Redmi Note 9 (`merlinx`, 3 GB / 4 GB RAM, 64 GB / 128 GB eMMC) with an **unlocked bootloader** and **custom recovery with root ADB** (TWRP, OrangeFox, PitchBlack, SHRP, etc.).
-- **PC:** Linux `x86_64` — **or Windows 10/11** via the automated **[install-windows.ps1](install-windows.ps1)** launcher (WSL2 Ubuntu + Windows `adb.exe`, no `usbipd` needed) — with **~18–20 GB free disk space** during build (~2 GB after optional cleanup).
+- **PC:** Linux `x86_64` with **~18–20 GB free disk space** during build (~2 GB after optional post-install cleanup) and a USB cable.
 
-### Linux
+### Step-by-Step
 1. **Clone the repository:**
    ```bash
    git clone -b mtk https://github.com/Yousef13710/IOS-for-Merlinx.git
    cd IOS-for-Merlinx
    ```
-2. **Boot your phone into Recovery** (hold **Vol+ + Power**), connect it via USB, and confirm `adb devices` shows `recovery`.
+2. **Boot your phone into Recovery** (hold **Vol+ + Power**), connect it to your PC via USB, and confirm ADB sees it:
+   ```bash
+   adb devices
+   ```
+   *(It should show `<serial> recovery`. In TWRP/OrangeFox, make sure ADB is enabled.)*
 3. **Run the installer:**
    ```bash
    ./setup-merlinx.sh
    ```
-   Choose **`1) Full Install`** and type **`YES`** when prompted. At the end, choose whether to clean up ~8 GB of temporary iOS/build files (`y`) or keep them (`N`).
+   - Choose **`1) Full Install`** and type **`YES`** when prompted.
+   - The script automatically checks/guides you on host tools (Theos + `iPhoneOS16.5.sdk`, `clang`, `python3`, etc.), downloads the official iOS 16.5 (20F66) IPSW, builds XNU + Mesa Panfrost + userland, packs `boot-ios.img`, auto-detects your 64 GB / 128 GB eMMC layout, formats `ext2`, and flashes everything.
+   - At the end, it asks if you want to **clean up ~8 GB** of temporary iOS/build files (`y`) or keep them (`N`) for faster future rebuilds.
+4. **Wait ~2 minutes on boot:** The phone reboots into `mtkloader` → XNU → iOS 16.5.
 
-### Windows 10 / 11
-1. **Clone or download** this repository (`mtk` branch), boot your phone into **Recovery** (hold **Vol+ + Power**), and plug it in via USB.
-2. Open **PowerShell** inside the folder and run:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
-   ```
-   It automatically sets up **WSL2 Ubuntu** (if needed), downloads Windows **`adb.exe`**, installs Linux build packages, and launches `./setup-merlinx.sh` using Windows USB directly.
-
-### First Boot
-Wait **~2 minutes** on boot (`mtkloader` → XNU → iOS 16.5). For manual build/flash commands and troubleshooting, see **[docs/merlinx-install.md](docs/merlinx-install.md)**.
+For manual build/flash commands and troubleshooting, see **[docs/merlinx-install.md](docs/merlinx-install.md)**.
 
 > [!TIP]
 > Always use `idevicediagnostics restart` over USB for clean reboots instead of holding Power/Volume keys so the persistent `ext2` (`iosdata`) filesystem stays clean.
