@@ -31,6 +31,19 @@ extern long real_RemotePairingGetUSBConnectedHostTrustState(void **outErr)
 
 static bool ours;
 static CFTypeRef dummy_notif;
+static CFDictionaryRef screenshotr_service;
+
+static const void *
+watched_CFDictionaryGetValue(CFDictionaryRef theDict, const void *key)
+{
+	const void *val = CFDictionaryGetValue(theDict, key);
+	if (val == NULL && ours && screenshotr_service != NULL && theDict != NULL && key != NULL &&
+	    CFGetTypeID(key) == CFStringGetTypeID() && CFEqual(key, CFSTR("com.apple.mobile.screenshotr")) &&
+	    CFDictionaryGetValue(theDict, CFSTR("com.apple.mobile.diagnostics_relay")) != NULL) {
+		return screenshotr_service;
+	}
+	return val;
+}
 
 static int
 watched_getsockopt(int s, int level, int optname, void *optval, socklen_t *optlen)
@@ -94,6 +107,7 @@ __attribute__((used)) static struct {
 	{ (const void *)watched_CFUserNotificationReceiveResponse, (const void *)real_CFUserNotificationReceiveResponse },
 	{ (const void *)watched_CFUserNotificationCancel, (const void *)real_CFUserNotificationCancel },
 	{ (const void *)watched_RemotePairingGetUSBConnectedHostTrustState, (const void *)real_RemotePairingGetUSBConnectedHostTrustState },
+	{ (const void *)watched_CFDictionaryGetValue, (const void *)CFDictionaryGetValue },
 };
 
 __attribute__((constructor))
@@ -105,5 +119,22 @@ redwood_lockdown_init(void)
 	if (ours) {
 		int one = 1;
 		dummy_notif = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &one);
+		CFStringRef prog = CFSTR("/redwood/bin/screenshotr");
+		CFArrayRef args = CFArrayCreate(kCFAllocatorDefault, (const void **)&prog, 1, &kCFTypeArrayCallBacks);
+		const void *keys[3] = {
+			CFSTR("AllowUnactivatedService"),
+			CFSTR("Label"),
+			CFSTR("ProgramArguments"),
+		};
+		const void *vals[3] = {
+			kCFBooleanTrue,
+			CFSTR("com.apple.mobile.screenshotr"),
+			args,
+		};
+		screenshotr_service = CFDictionaryCreate(kCFAllocatorDefault, keys, vals, 3,
+		    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+		if (args != NULL) {
+			CFRelease(args);
+		}
 	}
 }
