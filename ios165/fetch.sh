@@ -64,7 +64,7 @@ if [ ! -f .done-rootfs ] || [ select-system.py -nt .done-rootfs ]; then
 	python3 ../tools/font_trim.py faces rootfs/System/Library/Fonts/LanguageSupport/PingFang.ttc \
 		rootfs/System/Library/Fonts/LanguageSupport/PingFang.ttc '^\.?PingFang(SC|TC|HK)-(Regular|Semibold)$'
 	touch .done-rootfs
-	[ -n "$KEEP" ] || rm -f rootfs.dmg
+	[ -n "$KEEP" ] || rm -f rootfs.dmg rootfs.slt
 fi
 
 # --- the OS cryptex -------------------------------------------------------------------------------
@@ -104,5 +104,6 @@ if [ ! -f .done-cryptex-app ]; then
 	unzbm_all cryptex-app
 	[ -f cryptex-app/usr/libexec/webbookmarksd ] || { echo "fetch.sh: the App cryptex is incomplete"; exit 1; }
 	touch .done-cryptex-app
+	[ -n "$KEEP" ] || rm -f cryptex-app.dmg
 fi
 echo "fetch.sh: done: $(du -sh rootfs | cut -f1) rootfs, $(du -sh cryptex | cut -f1) cryptex, $(du -sh cryptex-app | cut -f1) App cryptex, $(du -sh $CACHE | cut -f1) dyld shared cache"

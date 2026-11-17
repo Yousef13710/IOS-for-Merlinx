@@ -373,8 +373,39 @@ EOF
 		--boot "$ROOT/boot-ios.img" \
 		--reboot
 	echo ""
-	ok "Installation complete! First boot takes ~2.5-3 minutes."
+	ok "Installation complete! First boot takes ~2 minutes."
 	echo "  Tip: For future reboots, use 'idevicediagnostics restart' over USB so ext2 stays clean."
+	echo ""
+	prompt_cleanup_artifacts
+}
+
+prompt_cleanup_artifacts() {
+	local ans
+	read -r -p "Free ~8 GB of disk space by removing extracted iOS 16.5 files and system.apfs? [y/N]: " ans
+	case "$ans" in
+		y|Y|yes|YES) action_cleanup_artifacts ;;
+		*) info "Keeping build/fetch files for faster future rebuilds." ;;
+	esac
+}
+
+action_cleanup_artifacts() {
+	info "Removing extracted iOS 16.5 files, system.apfs, and temporary build artifacts..."
+	rm -rf \
+		"$ROOT/ios165/rootfs" \
+		"$ROOT/ios165/20F66__iPhone10,3_6" \
+		"$ROOT/ios165/cryptex" \
+		"$ROOT/ios165/cryptex-app" \
+		"$ROOT/ios165/rootfs.slt" \
+		"$ROOT/ios165/rootfs.dmg" \
+		"$ROOT/ios165/cryptex-os.dmg" \
+		"$ROOT/ios165/cryptex-app.dmg" \
+		"$ROOT/ios165/.done-rootfs" \
+		"$ROOT/ios165/.done-cryptex" \
+		"$ROOT/ios165/.done-cryptex-app" \
+		"$ROOT/userland/system.apfs" \
+		"$ROOT/userland/sysroot" \
+		"$ROOT/payload.bin"
+	ok "Cleanup complete! Repo footprint reduced (boot-ios.img and source kept)."
 }
 
 action_update_boot() {
@@ -409,15 +440,17 @@ main_menu() {
 		echo "    3) Build Everything Only (no phone needed)"
 		echo "    4) Repair iosdata (run e2fsck -y in recovery)"
 		echo "    5) Run Host & Recovery Diagnostics"
+		echo "    6) Clean Up Build/Fetch Artifacts (free ~8 GB disk space)"
 		echo "    q) Quit"
 		echo ""
-		read -r -p "Choice [1-5/q]: " choice
+		read -r -p "Choice [1-6/q]: " choice
 		case "$choice" in
 			1) action_full_install || true; pause_enter ;;
 			2) action_update_boot || true; pause_enter ;;
 			3) build_all || true; pause_enter ;;
 			4) action_repair_iosdata || true; pause_enter ;;
 			5) check_host || true; echo ""; connect_recovery || true; pause_enter ;;
+			6) action_cleanup_artifacts || true; pause_enter ;;
 			q|Q) exit 0 ;;
 			*) warn "Invalid choice"; sleep 1 ;;
 		esac
