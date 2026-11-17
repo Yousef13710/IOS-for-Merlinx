@@ -85,9 +85,51 @@ if [ -n "$DEVICE" ] && [ "$DEVICE" != "merlin" ] && [ "$DEVICE" != "merlinx" ] &
 fi
 
 if [ "$DO_REPART" -eq 1 ]; then
+	GPT_INFO=$("${ADB[@]}" shell "sgdisk -p /dev/block/mmcblk0" 2>/dev/null | tr -d '\r')
+	read -r IOSDATA_START IOSDATA_END XNUSYS_START XNUSYS_END DISK_DESC < <(python3 -c '
+import re, sys
+text = sys.stdin.read()
+disk_m = re.search(r"Disk /dev/block/mmcblk0:\s*(\d+)\s*sectors,\s*([^\n]+)", text)
+last_m = re.search(r"last usable sector is\s*(\d+)", text)
+if not last_m:
+    sys.exit("Could not parse last usable sector from sgdisk -p")
+last_usable = int(last_m.group(1))
+parts = {}
+for line in text.splitlines():
+    m = re.match(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+", line)
+    if m:
+        parts[int(m.group(1))] = (int(m.group(2)), int(m.group(3)))
+
+if 43 in parts:
+    iosdata_start = parts[43][0]
+else:
+    prev_ends = [end for num, (_, end) in parts.items() if num < 43]
+    iosdata_start = ((max(prev_ends) + 1 + 2047) // 2048) * 2048 if prev_ends else 4767744
+
+tail_starts = [start for num, (start, _) in parts.items() if num > 45 and num != 48]
+limit_end = min(tail_starts) - 1 if tail_starts else last_usable
+# Match 64 GB layout (122021823 on 122142686-sector disk): align down to 2048-sector boundary,
+# leaving ~59 MiB margin at the end of usable space when no tail partitions are listed.
+if not tail_starts and limit_end == last_usable:
+    max_end = ((last_usable - 120000 + 1) // 2048) * 2048 - 1
+else:
+    max_end = ((limit_end + 1) // 2048) * 2048 - 1
+
+xnusys_sectors = 8390592  # 4.0 GiB (matches 113631232..122021823)
+xnusys_end = max_end
+xnusys_start = xnusys_end - xnusys_sectors + 1
+iosdata_end = xnusys_start - 1
+if iosdata_end <= iosdata_start + 2097152:
+    sys.exit(f"Invalid computed layout: iosdata {iosdata_start}..{iosdata_end}, xnusys {xnusys_start}..{xnusys_end}")
+desc = f"{disk_m.group(2).strip()} ({disk_m.group(1)} sectors)" if disk_m else f"{last_usable} sectors"
+print(iosdata_start, iosdata_end, xnusys_start, xnusys_end, desc)
+' <<< "$GPT_INFO")
+
+	IOSDATA_GIB=$(python3 -c "print(f'{($IOSDATA_END - $IOSDATA_START + 1) * 512 / (1024**3):.1f}')")
 	echo ""
+	echo "Detected eMMC: $DISK_DESC"
 	echo "WARNING: --repartition will DELETE Android 'super' (p43), 'cache' (p44), and 'userdata' (p45)"
-	echo "and create 'iosdata' (p43, ~51.9 GiB, sectors 4767744..113631231) and 'xnusys' (p48, 4.0 GiB, sectors 113631232..122021823)."
+	echo "and create 'iosdata' (p43, ~${IOSDATA_GIB} GiB, sectors ${IOSDATA_START}..${IOSDATA_END}) and 'xnusys' (p48, 4.0 GiB, sectors ${XNUSYS_START}..${XNUSYS_END})."
 	if [ "$DRY_RUN" -eq 0 ]; then
 		read -r -p "Type YES to continue: " CONFIRM
 		if [ "$CONFIRM" != "YES" ]; then
@@ -104,8 +146,8 @@ if [ "$DO_REPART" -eq 1 ]; then
 	echo "== Repartitioning /dev/block/mmcblk0 =="
 	run_adb shell "umount /data /cache /sdcard /iosdata 2>/dev/null || true"
 	run_adb shell "sgdisk --delete=43 --delete=44 --delete=45 --delete=48 /dev/block/mmcblk0 2>/dev/null || true"
-	run_adb shell "sgdisk --new=43:4767744:113631231 --change-name=43:iosdata --typecode=43:8300 /dev/block/mmcblk0"
-	run_adb shell "sgdisk --new=48:113631232:122021823 --change-name=48:xnusys --typecode=48:8300 /dev/block/mmcblk0"
+	run_adb shell "sgdisk --new=43:${IOSDATA_START}:${IOSDATA_END} --change-name=43:iosdata --typecode=43:8300 /dev/block/mmcblk0"
+	run_adb shell "sgdisk --new=48:${XNUSYS_START}:${XNUSYS_END} --change-name=48:xnusys --typecode=48:8300 /dev/block/mmcblk0"
 	run_adb shell "partprobe /dev/block/mmcblk0 2>/dev/null || blockdev --rereadpt /dev/block/mmcblk0 2>/dev/null || true"
 	sleep 1
 fi

@@ -847,9 +847,138 @@ static void build_nvram_image(uint8_t *image)
 #define PANIC_LOG_BASE 0x80100000ULL
 #define PANIC_LOG_SIZE 0x80000u
 
+static uint64_t
+dt_read_cells(const uint8_t *p, uint32_t cells)
+{
+	uint64_t v = 0;
+
+	for (uint32_t i = 0; i < cells; i++) {
+		v = (v << 32) | dt_be32(p + i * 4);
+	}
+	return v;
+}
+
+static int
+dt_name_is(const char *node, const char *prefix)
+{
+	while (*prefix) {
+		if (*node++ != *prefix++) {
+			return 0;
+		}
+	}
+	return *node == '\0' || *node == '@';
+}
+
+/*
+ * Detect usable DRAM starting at XNU_PHYS_BASE from LK's device tree (/memory + /reserved-memory).
+ * Supports both 3 GB (992 MB: 0xc0000000..0xfe000000) and 4 GB (~2016 MB: 0xc0000000..0x13e000000)
+ * merlinx variants, falling back to XNU_MEM_SIZE if the tree is missing or smaller.
+ */
+static uint64_t
+detect_xnu_mem_size(uint64_t dtb)
+{
+	const uint8_t *fdt = (const uint8_t *)(uintptr_t)dtb;
+	const uint8_t *structs, *p, *end;
+	const char *strings;
+	struct {
+		const char *name;
+		const uint8_t *reg;
+		uint32_t reg_len;
+		uint32_t address_cells, size_cells;
+		int is_memory, is_reserved;
+	} level[16];
+	int depth = -1;
+	uint64_t mem_end = 0;
+	uint64_t min_reserved = ~0ULL;
+
+	if (dtb == 0 || dt_be32(fdt) != FDT_MAGIC) {
+		return XNU_MEM_SIZE;
+	}
+	structs = fdt + dt_be32(fdt + 8);
+	strings = (const char *)(fdt + dt_be32(fdt + 12));
+	end = structs + dt_be32(fdt + 36);
+
+	for (p = structs; p < end;) {
+		uint32_t token = dt_be32(p);
+
+		p += 4;
+		if (token == FDT_BEGIN_NODE) {
+			const char *name = (const char *)p;
+
+			p += (dt_len(name) + 1 + 3) & ~3u;
+			if (++depth >= 16) {
+				return XNU_MEM_SIZE;
+			}
+			level[depth].name = name;
+			level[depth].reg = NULL;
+			level[depth].reg_len = 0;
+			level[depth].address_cells = depth > 0 ? level[depth - 1].address_cells : 2;
+			level[depth].size_cells = depth > 0 ? level[depth - 1].size_cells : 2;
+			level[depth].is_memory = (depth == 1 && dt_name_is(name, "memory"));
+			level[depth].is_reserved = (depth == 2 && level[1].name != NULL &&
+			    dt_name_is(level[1].name, "reserved-memory"));
+		} else if (token == FDT_PROP) {
+			uint32_t len = dt_be32(p), name_offset = dt_be32(p + 4);
+			const char *prop = strings + name_offset;
+			const uint8_t *value = p + 8;
+
+			p += 8 + ((len + 3) & ~3u);
+			if (depth < 0) {
+				continue;
+			}
+			if (dt_streq(prop, "#address-cells") && len == 4) {
+				level[depth].address_cells = dt_be32(value);
+			} else if (dt_streq(prop, "#size-cells") && len == 4) {
+				level[depth].size_cells = dt_be32(value);
+			} else if (dt_streq(prop, "reg")) {
+				level[depth].reg = value;
+				level[depth].reg_len = len;
+			}
+		} else if (token == FDT_END_NODE) {
+			if (depth >= 1 && level[depth].reg != NULL) {
+				uint32_t ac = level[depth - 1].address_cells;
+				uint32_t sc = level[depth - 1].size_cells;
+				uint32_t stride = (ac + sc) * 4;
+
+				if (ac >= 1 && ac <= 2 && sc >= 1 && sc <= 2 && stride > 0) {
+					for (uint32_t off = 0; off + stride <= level[depth].reg_len; off += stride) {
+						uint64_t base = dt_read_cells(level[depth].reg + off, ac);
+						uint64_t size = dt_read_cells(level[depth].reg + off + ac * 4, sc);
+						uint64_t tend = base + size;
+
+						if (level[depth].is_memory && base <= XNU_PHYS_BASE && tend > XNU_PHYS_BASE) {
+							if (tend > mem_end) {
+								mem_end = tend;
+							}
+						} else if (level[depth].is_reserved && base > XNU_PHYS_BASE && base < min_reserved) {
+							min_reserved = base;
+						}
+					}
+				}
+			}
+			depth--;
+		} else if (token == FDT_END) {
+			break;
+		}
+	}
+
+	if (mem_end <= XNU_PHYS_BASE) {
+		return XNU_MEM_SIZE;
+	}
+	/* Keep a 32 MB margin at exact 256 MB / GiB boundaries for ATF/TEE/EMI if LK didn't trim /memory. */
+	if ((mem_end & 0x0fffffffULL) == 0 && mem_end > XNU_PHYS_BASE + 0x02000000ULL) {
+		mem_end -= 0x02000000ULL;
+	}
+	if (min_reserved < mem_end && min_reserved > XNU_PHYS_BASE) {
+		mem_end = min_reserved;
+	}
+	uint64_t detected = (mem_end - XNU_PHYS_BASE) & ~0x1fffffULL;
+	return detected >= XNU_MEM_SIZE ? detected : XNU_MEM_SIZE;
+}
+
 /* As xnuloader/loader.c builds it for x6826b, minus what needs UEFI. */
 static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_size,
-    uint64_t sys_pa, uint64_t sys_size)
+    uint64_t sys_pa, uint64_t sys_size, uint64_t xnu_mem_size)
 {
 	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .depth = 0 };
 	uint64_t cntfrq = dbg_freq();
@@ -874,7 +1003,7 @@ static uint32_t build_device_tree(uint64_t dt_pa, uint64_t rd_pa, uint64_t rd_si
 	dt_prop_str(&w, "darwin-board", "merlinx");
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", XNU_PHYS_BASE);
-	dt_prop_u64(&w, "dram-size", XNU_MEM_SIZE);
+	dt_prop_u64(&w, "dram-size", xnu_mem_size);
 	dt_prop_u32(&w, "debug-enabled", 1);
 	dt_prop_u32(&w, "display-scale", 2);
 	dt_prop_u32(&w, "display-rotation", 0);
@@ -2345,8 +2474,9 @@ static void __attribute__((noreturn)) run_xnu(void)
 	uint64_t sys_pa = sys_size ? SYSTEM_PA : 0;
 	uint64_t sys_span = (sys_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
 
+	uint64_t xnu_mem_size = detect_xnu_mem_size(lk_dtb);
 	uint64_t dt_pa = sys_size ? sys_pa + sys_span : rd_pa + rd_size;
-	uint32_t dt_len = build_device_tree(dt_pa, rd_pa, rd_size, sys_pa, sys_span);
+	uint32_t dt_len = build_device_tree(dt_pa, rd_pa, rd_size, sys_pa, sys_span, xnu_mem_size);
 	uint64_t ba_pa = (dt_pa + dt_len + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
 	uint64_t top = ba_pa + PAGE_SIZE_MAX;
 
@@ -2356,8 +2486,8 @@ static void __attribute__((noreturn)) run_xnu(void)
 	ba->version = 2;
 	ba->physBase = XNU_PHYS_BASE;
 	ba->virtBase = KERNEL_VIRT_BASE;
-	ba->memSize = XNU_MEM_SIZE;
-	ba->memSizeActual = XNU_MEM_SIZE;
+	ba->memSize = xnu_mem_size;
+	ba->memSizeActual = xnu_mem_size;
 	ba->topOfKernelData = top;
 	ba->deviceTreeP = dt_pa - XNU_SLIDE;
 	ba->deviceTreeLength = dt_len;
@@ -2383,7 +2513,7 @@ static void __attribute__((noreturn)) run_xnu(void)
 	out(", XNU memory ");
 	out_hex(XNU_PHYS_BASE);
 	out("+");
-	out_hex(XNU_MEM_SIZE);
+	out_hex(xnu_mem_size);
 	out("\n");
 	display_alpha_off();
 
