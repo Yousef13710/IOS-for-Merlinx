@@ -88,15 +88,20 @@ if [ -n "$DEVICE" ] && [ "$DEVICE" != "merlin" ] && [ "$DEVICE" != "merlinx" ] &
 fi
 
 if [ "$DO_REPART" -eq 1 ]; then
-	GPT_INFO=$("${ADB[@]}" shell "sgdisk -p /dev/block/mmcblk0" 2>/dev/null | tr -d '\r')
-	read -r IOSDATA_START IOSDATA_END XNUSYS_START XNUSYS_END DISK_DESC < <(python3 -c '
+	GPT_INFO=$("${ADB[@]}" shell "sgdisk -p /dev/block/mmcblk0 2>&1; echo; echo TOTAL_SECTORS=\$(cat /sys/block/mmcblk0/size 2>/dev/null || blockdev --getsz /dev/block/mmcblk0 2>/dev/null)" | tr -d '\r')
+	if ! read -r IOSDATA_START IOSDATA_END XNUSYS_START XNUSYS_END DISK_DESC < <(python3 -c '
 import re, sys
 text = sys.stdin.read()
-disk_m = re.search(r"Disk /dev/block/mmcblk0:\s*(\d+)\s*sectors,\s*([^\n]+)", text)
-last_m = re.search(r"last usable sector is\s*(\d+)", text)
-if not last_m:
-    sys.exit("Could not parse last usable sector from sgdisk -p")
-last_usable = int(last_m.group(1))
+disk_m = re.search(r"Disk /dev/block/mmcblk0:\s*(\d+)\s*sectors,\s*([^\n]+)", text, re.I)
+last_m = re.search(r"last usable sector is\s*(\d+)", text, re.I)
+total_m = re.search(r"TOTAL_SECTORS=(\d+)", text)
+if last_m:
+    last_usable = int(last_m.group(1))
+elif total_m and int(total_m.group(1)) > 100000:
+    last_usable = int(total_m.group(1)) - 34
+else:
+    sys.stderr.write("Could not determine eMMC size. Raw sgdisk output was:\n" + text + "\n")
+    sys.exit(1)
 parts = {}
 for line in text.splitlines():
     m = re.match(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+", line)
@@ -126,7 +131,10 @@ if iosdata_end <= iosdata_start + 2097152:
     sys.exit(f"Invalid computed layout: iosdata {iosdata_start}..{iosdata_end}, xnusys {xnusys_start}..{xnusys_end}")
 desc = f"{disk_m.group(2).strip()} ({disk_m.group(1)} sectors)" if disk_m else f"{last_usable} sectors"
 print(iosdata_start, iosdata_end, xnusys_start, xnusys_end, desc)
-' <<< "$GPT_INFO")
+' <<< "$GPT_INFO"); then
+		echo "Error: could not compute the partition layout (see output above). Nothing was changed on the phone." >&2
+		exit 1
+	fi
 
 	IOSDATA_GIB=$(python3 -c "print(f'{($IOSDATA_END - $IOSDATA_START + 1) * 512 / (1024**3):.1f}')")
 	echo ""
