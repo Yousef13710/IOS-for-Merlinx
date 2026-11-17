@@ -164,10 +164,20 @@ if [ -n "$XNUSYS_IMG" ]; then
 	fi
 	echo "== Flashing $XNUSYS_IMG to /dev/block/by-name/xnusys =="
 	if [ "$DRY_RUN" -eq 1 ]; then
-		echo "[dry-run] ${ADB[*]} exec-in \"dd of=/dev/block/by-name/xnusys bs=4M && sync\" < $XNUSYS_IMG"
+		echo "[dry-run] split 512M + ${ADB[*]} push /tmp/xnusys.part + dd of=/dev/block/by-name/xnusys bs=4M seek=..."
 	else
 		XNUSYS_DEV=$("${ADB[@]}" shell '[ -e /dev/block/by-name/xnusys ] && echo /dev/block/by-name/xnusys || echo /dev/block/mmcblk0p48' | tr -d '\r')
-		"${ADB[@]}" exec-in "dd of=\"$XNUSYS_DEV\" bs=4M && sync" < "$XNUSYS_IMG"
+		TMP_SPLIT=$(mktemp -d)
+		split -b 512M -d -a 3 "$XNUSYS_IMG" "$TMP_SPLIT/part_"
+		SEEK_4M=0
+		for part in "$TMP_SPLIT"/part_*; do
+			echo "  flashing $(basename "$part") at offset $((SEEK_4M * 4)) MiB..."
+			"${ADB[@]}" push "$part" /tmp/xnusys.part
+			"${ADB[@]}" shell "dd if=/tmp/xnusys.part of=\"$XNUSYS_DEV\" bs=4M seek=$SEEK_4M conv=notrunc && rm -f /tmp/xnusys.part"
+			SEEK_4M=$((SEEK_4M + 128))
+		done
+		"${ADB[@]}" shell "sync"
+		rm -rf "$TMP_SPLIT"
 	fi
 fi
 
