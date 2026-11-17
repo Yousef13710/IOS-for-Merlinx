@@ -1,6 +1,6 @@
 # Installing HakiOS on Xiaomi Redmi Note 9 (`merlinx`)
 
-Complete guide to building and installing HakiOS (XNU 8796.121.2 / iOS 16.5) on the **Xiaomi Redmi Note 9 (`merlinx`, MediaTek Helio G85 MT6768, 3 GB RAM)** with on-eMMC `xnusys` (4.0 GiB) and persistent `iosdata` (`ext2`, ~51.9 GiB).
+Complete guide to building and installing HakiOS (XNU 8796.121.2 / iOS 16.5) on the **Xiaomi Redmi Note 9 (`merlinx`, MediaTek Helio G85 MT6768, 3 GB / 4 GB RAM, 64 GB / 128 GB eMMC)** with on-eMMC `xnusys` (4.0 GiB) and persistent `iosdata` (`ext2`, auto-sized).
 
 > [!WARNING]
 > **ALL DATA ON YOUR PHONE WILL BE LOST.** Installing HakiOS completely deletes Android's `super`, `cache`, and `userdata` partitions and replaces them with `iosdata` (`ext2`) + `xnusys`. No backup is made.
@@ -25,7 +25,7 @@ The ASCII TUI installer checks your host tools and recovery connection, guides y
   - Bluetooth (`connsys_bt=2`, `bluetoothd`, `BlueTool` — Settings → Bluetooth works and stays on).
   - Wi-Fi & NTP time sync (`connsys_step=17`, `WIFID=1`, `com.apple.timed`): scans, joins, and authenticates on Open & WPA2 networks (2.4 GHz & 5 GHz), DHCP, DNS, TCP/UDP, NTP.
   - Rear camera (`s5kgm1sp`, `mtkcam_skel=1`, live preview in `Camera.app`, currently laggy/tearing).
-  - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, ~51.9 GiB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, `CMD23`/`CMD25` multi-block eMMC writes, 2 s background dirty-block sync, per-inode `fsync`, and 32 KB read-ahead (**~60 s boot**; un-chopped icons, widgets).
+  - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, auto-sized: ~51.9 GiB on 64 GB / ~110 GiB on 128 GB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, `CMD23`/`CMD25` multi-block eMMC writes, 2 s background dirty-block sync, per-inode `fsync`, and 32 KB read-ahead (**~60 s boot**; un-chopped icons, widgets).
   - Optional RAM-only `/private/var` mode (`no_ext2=1` boot-arg, non-persistent).
 - **Known Limitations:**
   - **Live dynamic `PosterBoard` wallpapers** are not enabled (uses fast static `750x1624` wallpapers + **Settings → Wallpaper** picker).
@@ -38,7 +38,7 @@ The ASCII TUI installer checks your host tools and recovery connection, guides y
 ## 2. Requirements
 
 ### Device
-- Xiaomi Redmi Note 9 (`merlinx`, MT6768, 64 GB eMMC, 3 GB RAM)
+- Xiaomi Redmi Note 9 (`merlinx`, MT6768, 64 GB / 128 GB eMMC, 3 GB / 4 GB RAM — both auto-detected)
 - Unlocked bootloader
 - **TWRP recovery** flashed to `recovery` (`mmcblk0p1`)
 
@@ -53,14 +53,14 @@ The ASCII TUI installer checks your host tools and recovery connection, guides y
 
 ## 3. Partition Layout (`mmcblk0`)
 
-On a 64 GB `merlinx`, `iosdata` + `xnusys` use the space previously occupied by Android `super`, `cache`, and `userdata`:
+`tools/install-merlinx.sh --repartition` auto-detects the eMMC size from `sgdisk -p` and replaces Android `super`, `cache`, and `userdata` with `iosdata` + `xnusys` (example below is the 64 GB layout; on 128 GB, `iosdata` expands to ~110 GiB and `xnusys` sits at the end of the disk):
 
-| Partition | Name | Sectors (512B) | Size | Purpose |
+| Partition | Name | Sectors (512B, 64 GB) | Size | Purpose |
 |---|---|---|---|---|
 | `p1` | `recovery` | stock | stock | TWRP (keep!) |
 | `p33` | `boot` | stock | 64 MiB | HakiOS `boot.img` (`mtkloader` + `payload.bin`) |
-| `p43` | `iosdata` | `4767744 .. 113631231` | ~51.9 GiB | `ext2` (`-b 4096 -L iosdata`), mounted at `/private/var` |
-| `p48` | `xnusys` | `113631232 .. 122021823` | 4.0 GiB | iOS 16.5 `packfs` rootfs (`/dev/emmc0`, read-only) |
+| `p43` | `iosdata` | `4767744 .. 113631295` | ~51.9 GiB (64 GB) / ~110 GiB (128 GB) | `ext2` (`-b 4096 -L iosdata`), mounted at `/private/var` |
+| `p48` | `xnusys` | `113631296 .. 122021887` | 4.0 GiB | iOS 16.5 `packfs` rootfs (`/dev/emmc0`, read-only) |
 
 All bootloader, TEE, modem/NV, and firmware partitions (`preloader`, `lk`, `tee`, `nvram`, `persist`, etc.) are untouched.
 
