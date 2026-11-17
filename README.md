@@ -80,7 +80,7 @@ For manual build/flash commands and troubleshooting, see **[docs/merlinx-install
 - **[IOS-for-Merlinx](https://github.com/Yousef13710/IOS-for-Merlinx)** — Redmi Note 9 (`merlinx`) port (`mtk` branch)
 - **[hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel)** — Upstream HakiOS repository (`X6826B`)
 
-No Apple binaries or vendor firmware are hosted in this repository (`./ios165/fetch.sh` downloads the official IPSW during setup). XNU patches are under the **Apple Public Source License 2.0**; original loader, driver, and userland code is under **MIT**. Not affiliated with or endorsed by Apple.
+The repository includes CONNSYS radio firmware under `firmware/connsys`; these vendor files are separate from the project's own code. Apple binaries are not included (`./ios165/fetch.sh` downloads the official IPSW during setup). XNU patches are under the **Apple Public Source License 2.0**; original loader, driver, and userland code is under **MIT**. Not affiliated with or endorsed by Apple.
 
 ---
 

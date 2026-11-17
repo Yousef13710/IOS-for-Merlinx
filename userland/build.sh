@@ -609,11 +609,15 @@ if [ -n "$ADSP" ] && [ -f ../fw-audio/adsp.mdt ]; then
 	mkdir -p root/fw
 	install -m 0644 ../fw-audio/adsp.mdt ../fw-audio/adsp.b0[2-9] ../fw-audio/adsp.b[1-9][0-9] root/fw/
 fi
-# CONNSYS Wi-Fi + BT firmware (redwood_connsys.c checks /redwood/fw/connsys/ before /fw/connsys/)
-if [ -f ../xnu-deps/build/connsys-fw/firmware/WIFI_RAM_CODE_soc1_0_1a_1.bin ]; then
-	mkdir -p root/fw/connsys
-	install -m 0644 ../xnu-deps/build/connsys-fw/firmware/* root/fw/connsys/
-fi
+# CONNSYS Wi-Fi + BT firmware, included in the repository for the MT6768 radio.
+for f in WIFI_RAM_CODE_soc1_0_1a_1.bin soc1_0_patch_mcu_1a_1_hdr.bin soc1_0_ram_bt_1a_1_hdr.bin soc1_0_ram_mcu_1a_1_hdr.bin soc1_0_ram_wifi_1a_1_hdr.bin; do
+	if [ ! -f "../firmware/connsys/$f" ]; then
+		echo "build.sh: missing CONNSYS firmware: firmware/connsys/$f" >&2
+		exit 1
+	fi
+done
+mkdir -p root/fw/connsys
+install -m 0644 ../firmware/connsys/* root/fw/connsys/
 # Firmware that is not there is otherwise silent at build time and speaks only much later, deep in a
 # device log -- "adreno: THE GPU IS NOT STARTED: the small image has no fw/a660_gmu.bin" cost a phone
 # slot on 19 October 2026. It is the vendor's and never in the repository, so a copy made with bare
@@ -764,13 +768,9 @@ if [ -f $IOS/system.manifest ] && [ -f $CACHE/dyld_shared_cache_arm64 ] &&
 		mkdir -p sysroot/fw
 		cp ../fw-audio/aw882xx_acf.bin sysroot/fw/
 	fi
-	# the Infinix's CONNSYS firmware (Wi-Fi, Bluetooth), the phone's own /vendor/firmware taken off it through root
-	# into ../xnu-deps/build/connsys-fw (never in the repository): /fw/connsys, where bsd/dev/redwood_connsys.c reads
-	# it once the root is mounted (connsys_step=5)
-	if [ -d ../xnu-deps/build/connsys-fw/firmware ]; then
-		mkdir -p sysroot/fw/connsys
-		cp ../xnu-deps/build/connsys-fw/firmware/* sysroot/fw/connsys/
-	fi
+	# CONNSYS firmware is also included in the system volume.
+	mkdir -p sysroot/fw/connsys
+	cp ../firmware/connsys/* sysroot/fw/connsys/
 	# the package manager's prefix, when tools/mk-jb.sh has fetched one: the Procursus bootstrap with
 	# Sileo in it, as /jb. It cannot live at /var/jb in the image -- /private/var is a memory
 	# filesystem made afresh at every boot -- so init copies it there (src/init.c, copy_tree).

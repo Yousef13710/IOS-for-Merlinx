@@ -24,6 +24,7 @@
 !/uefi/
 !/prebuilt/
 !/wifi/
+!/firmware/
 
 __pycache__/
 .DS_Store
@@ -100,7 +101,8 @@ __pycache__/
 /mtkloader/*.elf
 /mtkloader/*.img
 
-# Nothing of Apple's and nothing of a vendor's, wherever it would land (the rules of the oosexgang
+# Nothing of Apple's and, except the explicitly included CONNSYS firmware, nothing of a vendor's
+# wherever it would land (the rules of the oosexgang
 # organisation, LEGAL.md there): no picture of iOS (screenshots, photographs of the screen), no
 # firmware, no image or device tree taken off a phone, no IPSW or anything out of one. The docs
 # describe what the screen showed in words; firmware is pulled from the user's own phone.
@@ -119,6 +121,7 @@ __pycache__/
 *.fd
 *.img
 *.bin
+!/firmware/connsys/*.bin
 *.ko
 *.apfs
 *.zst
