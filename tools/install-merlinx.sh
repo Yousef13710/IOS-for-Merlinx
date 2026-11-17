@@ -163,8 +163,12 @@ if [ -n "$XNUSYS_IMG" ]; then
 		exit 1
 	fi
 	echo "== Flashing $XNUSYS_IMG to /dev/block/by-name/xnusys =="
-	run_adb push "$XNUSYS_IMG" /tmp/xnusys.img
-	run_adb shell "XNUSYS_DEV=/dev/block/by-name/xnusys; [ -e \"\$XNUSYS_DEV\" ] || XNUSYS_DEV=/dev/block/mmcblk0p48; dd if=/tmp/xnusys.img of=\"\$XNUSYS_DEV\" bs=4M && sync && rm -f /tmp/xnusys.img"
+	if [ "$DRY_RUN" -eq 1 ]; then
+		echo "[dry-run] ${ADB[*]} exec-in \"dd of=/dev/block/by-name/xnusys bs=4M && sync\" < $XNUSYS_IMG"
+	else
+		XNUSYS_DEV=$("${ADB[@]}" shell '[ -e /dev/block/by-name/xnusys ] && echo /dev/block/by-name/xnusys || echo /dev/block/mmcblk0p48' | tr -d '\r')
+		"${ADB[@]}" exec-in "dd of=\"$XNUSYS_DEV\" bs=4M && sync" < "$XNUSYS_IMG"
+	fi
 fi
 
 if [ -n "$BOOT_IMG" ]; then
