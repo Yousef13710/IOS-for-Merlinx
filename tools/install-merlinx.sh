@@ -88,59 +88,92 @@ if [ -n "$DEVICE" ] && [ "$DEVICE" != "merlin" ] && [ "$DEVICE" != "merlinx" ] &
 fi
 
 if [ "$DO_REPART" -eq 1 ]; then
-	GPT_INFO=$("${ADB[@]}" shell "sgdisk -p /dev/block/mmcblk0 2>&1; echo; echo TOTAL_SECTORS=\$(cat /sys/block/mmcblk0/size 2>/dev/null || blockdev --getsz /dev/block/mmcblk0 2>/dev/null)" | tr -d '\r')
-	if ! read -r IOSDATA_START IOSDATA_END XNUSYS_START XNUSYS_END DISK_DESC < <(python3 -c '
-import re, sys
-text = sys.stdin.read()
-disk_m = re.search(r"Disk /dev/block/mmcblk0:\s*(\d+)\s*sectors,\s*([^\n]+)", text, re.I)
-last_m = re.search(r"last usable sector is\s*(\d+)", text, re.I)
-total_m = re.search(r"TOTAL_SECTORS=(\d+)", text)
-if last_m:
-    last_usable = int(last_m.group(1))
-elif total_m and int(total_m.group(1)) > 100000:
-    last_usable = int(total_m.group(1)) - 34
-else:
-    sys.stderr.write("Could not determine eMMC size. Raw sgdisk output was:\n" + text + "\n")
+	# Read the GPT straight off the eMMC (the first 1 MiB) instead of parsing `sgdisk -p`: Android recoveries ship
+	# different sgdisk builds (some do not even know -p), but dd and adb pull always work.
+	GPT_HEAD=$(mktemp)
+	"${ADB[@]}" shell "dd if=/dev/block/mmcblk0 of=/tmp/gpt_head.bin bs=512 count=2048 2>/dev/null"
+	"${ADB[@]}" pull /tmp/gpt_head.bin "$GPT_HEAD" >/dev/null
+	"${ADB[@]}" shell "rm -f /tmp/gpt_head.bin"
+	GPT_TOTAL=$("${ADB[@]}" shell "cat /sys/block/mmcblk0/size 2>/dev/null" | tr -d '\r\n ')
+	GPT_INFO=""
+	if ! read -r IOSDATA_START IOSDATA_END XNUSYS_START XNUSYS_END XNUSYS_PART DEL_LIST DISK_DESC < <(python3 - "$GPT_HEAD" "${GPT_TOTAL:-0}" <<'PY'
+import struct, sys
+
+data = open(sys.argv[1], "rb").read()
+total = int(sys.argv[2] or 0)
+
+def fail(msg):
+    sys.stderr.write("Error: " + msg + "\n")
     sys.exit(1)
+
+if data[512:520] != b"EFI PART":
+    fail("no GPT found on /dev/block/mmcblk0 (is this really a merlin/merlinx in recovery?)")
+first_usable, last_usable = struct.unpack_from("<QQ", data, 512 + 40)
+entries_lba, count, size = struct.unpack_from("<QII", data, 512 + 72)
+if size < 128 or count == 0 or (entries_lba * 512 + count * size) > len(data):
+    fail("unexpected GPT layout (entries at LBA %d, %d x %d bytes)" % (entries_lba, count, size))
+
 parts = {}
-for line in text.splitlines():
-    m = re.match(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+", line)
-    if m:
-        parts[int(m.group(1))] = (int(m.group(2)), int(m.group(3)))
+for i in range(count):
+    e = data[entries_lba * 512 + i * size: entries_lba * 512 + (i + 1) * size]
+    if e[:16] == b"\0" * 16:
+        continue
+    first, last = struct.unpack_from("<QQ", e, 32)
+    name = e[56:128].decode("utf-16le", "ignore").split("\0")[0]
+    parts[i + 1] = (first, last, name)
 
-if 43 in parts:
-    iosdata_start = parts[43][0]
-else:
-    prev_ends = [end for num, (_, end) in parts.items() if num < 43]
-    iosdata_start = ((max(prev_ends) + 1 + 2047) // 2048) * 2048 if prev_ends else 4767744
+sys.stderr.write("== Current partition table of the phone (%d slots, usable sectors %d..%d) ==\n" % (count, first_usable, last_usable))
+for n in sorted(parts):
+    f, l, name = parts[n]
+    sys.stderr.write("  p%-3d %12d %12d  %7.2f GiB  %s\n" % (n, f, l, (l - f + 1) * 512 / 2**30, name))
 
-tail_starts = [start for num, (start, _) in parts.items() if num > 45 and num != 48]
-limit_end = min(tail_starts) - 1 if tail_starts else last_usable
-# Match 64 GB layout (122021823 on 122142686-sector disk): align down to 2048-sector boundary,
-# leaving ~59 MiB margin at the end of usable space when no tail partitions are listed.
-if not tail_starts and limit_end == last_usable:
-    max_end = ((last_usable - 120000 + 1) // 2048) * 2048 - 1
-else:
-    max_end = ((limit_end + 1) // 2048) * 2048 - 1
+OURS = {43, 44, 45, 48}
+expected = {"super", "cache", "userdata", "iosdata", "xnusys"}
+for n in (43, 44, 45):
+    if n in parts and parts[n][2] not in expected:
+        fail("p%d is '%s', not Android's super/cache/userdata. Refusing to touch it. Nothing was changed." % (n, parts[n][2]))
 
-xnusys_sectors = 8390592  # 4.0 GiB (matches 113631232..122021823)
-xnusys_end = max_end
+present = [n for n in sorted(OURS) if n in parts]
+if 43 not in parts and not present:
+    fail("none of p43/p44/p45/p48 exist; this does not look like a merlin/merlinx layout. Nothing was changed.")
+region_start = parts[43][0] if 43 in parts else min(parts[n][0] for n in present)
+# the space those partitions occupy now is ours to reuse, up to the next foreign partition
+region_end = max(parts[n][1] for n in present)
+tail = [f for n, (f, l, nm) in parts.items() if n not in OURS and f > region_start]
+if 45 not in parts:
+    # a half-done earlier run (userdata already gone): take the free space up to the next foreign partition,
+    # or to the end of the disk less ~59 MiB, which is where stock userdata ended
+    region_end = (min(tail) - 1) if tail else ((last_usable - 120000 + 1) // 2048) * 2048 - 1 - 64
+if tail and min(tail) - 1 < region_end:
+    region_end = min(tail) - 1
+if region_end > last_usable:
+    region_end = last_usable
+
+xnusys_sectors = 8390592  # 4.0 GiB
+xnusys_end = region_end
 xnusys_start = xnusys_end - xnusys_sectors + 1
+iosdata_start = region_start
 iosdata_end = xnusys_start - 1
 if iosdata_end <= iosdata_start + 2097152:
-    sys.exit(f"Invalid computed layout: iosdata {iosdata_start}..{iosdata_end}, xnusys {xnusys_start}..{xnusys_end}")
-desc = f"{disk_m.group(2).strip()} ({disk_m.group(1)} sectors)" if disk_m else f"{last_usable} sectors"
-print(iosdata_start, iosdata_end, xnusys_start, xnusys_end, desc)
-' <<< "$GPT_INFO"); then
-		echo "Error: could not compute the partition layout (see output above). Nothing was changed on the phone." >&2
+    fail("not enough room: iosdata %d..%d, xnusys %d..%d. Nothing was changed." % (iosdata_start, iosdata_end, xnusys_start, xnusys_end))
+# the partition number is only a label (the kernel and installer look partitions up by name)
+xnusys_part = 48 if count >= 48 else 44
+dels = ",".join(str(n) for n in present) or "-"
+desc = "%.1f GiB eMMC (%d sectors, %d GPT slots)" % ((total or last_usable + 34) * 512 / 2**30, total or last_usable + 34, count)
+print(iosdata_start, iosdata_end, xnusys_start, xnusys_end, xnusys_part, dels, desc)
+PY
+); then
+		rm -f "$GPT_HEAD"
+		echo "Error: could not compute the partition layout (see above). Nothing was changed on the phone." >&2
 		exit 1
 	fi
+	rm -f "$GPT_HEAD"
 
 	IOSDATA_GIB=$(python3 -c "print(f'{($IOSDATA_END - $IOSDATA_START + 1) * 512 / (1024**3):.1f}')")
 	echo ""
 	echo "Detected eMMC: $DISK_DESC"
 	echo "WARNING: --repartition will DELETE Android 'super' (p43), 'cache' (p44), and 'userdata' (p45)"
-	echo "and create 'iosdata' (p43, ~${IOSDATA_GIB} GiB, sectors ${IOSDATA_START}..${IOSDATA_END}) and 'xnusys' (p48, 4.0 GiB, sectors ${XNUSYS_START}..${XNUSYS_END})."
+	echo "and create 'iosdata' (p43, ~${IOSDATA_GIB} GiB, sectors ${IOSDATA_START}..${IOSDATA_END}) and 'xnusys' (p${XNUSYS_PART}, 4.0 GiB, sectors ${XNUSYS_START}..${XNUSYS_END})."
 	if [ "$DRY_RUN" -eq 0 ] && [ "$YES_CONFIRMED" -eq 0 ]; then
 		read -r -p "Type YES to continue: " CONFIRM
 		if [ "$CONFIRM" != "YES" ]; then
@@ -156,9 +189,16 @@ print(iosdata_start, iosdata_end, xnusys_start, xnusys_end, desc)
 
 	echo "== Repartitioning /dev/block/mmcblk0 =="
 	run_adb shell "umount /data /cache /sdcard /iosdata 2>/dev/null || true"
-	run_adb shell "sgdisk --delete=43 --delete=44 --delete=45 --delete=48 /dev/block/mmcblk0 2>/dev/null || true"
-	run_adb shell "sgdisk --new=43:${IOSDATA_START}:${IOSDATA_END} --change-name=43:iosdata --typecode=43:8300 /dev/block/mmcblk0"
-	run_adb shell "sgdisk --new=48:${XNUSYS_START}:${XNUSYS_END} --change-name=48:xnusys --typecode=48:8300 /dev/block/mmcblk0"
+	# One sgdisk call: it saves the table only if EVERY operation succeeds, so a failure leaves Android's partitions untouched.
+	SG_ARGS=""
+	for n in ${DEL_LIST//,/ }; do [ "$n" = "-" ] || SG_ARGS="$SG_ARGS --delete=$n"; done
+	SG_ARGS="$SG_ARGS --new=43:${IOSDATA_START}:${IOSDATA_END} --change-name=43:iosdata --typecode=43:8300"
+	SG_ARGS="$SG_ARGS --new=${XNUSYS_PART}:${XNUSYS_START}:${XNUSYS_END} --change-name=${XNUSYS_PART}:xnusys --typecode=${XNUSYS_PART}:8300"
+	if ! run_adb shell "sgdisk $SG_ARGS /dev/block/mmcblk0"; then
+		echo "Error: sgdisk could not create the partitions; the partition table was NOT changed." >&2
+		echo "Please send the table printed above when asking for help." >&2
+		exit 1
+	fi
 	run_adb shell "partprobe /dev/block/mmcblk0 2>/dev/null || blockdev --rereadpt /dev/block/mmcblk0 2>/dev/null || true"
 	sleep 1
 fi
@@ -177,7 +217,7 @@ if [ -n "$XNUSYS_IMG" ]; then
 	if [ "$DRY_RUN" -eq 1 ]; then
 		echo "[dry-run] split 512M + ${ADB[*]} push /tmp/xnusys.part + dd of=/dev/block/by-name/xnusys bs=4M seek=..."
 	else
-		XNUSYS_DEV=$("${ADB[@]}" shell '[ -e /dev/block/by-name/xnusys ] && echo /dev/block/by-name/xnusys || echo /dev/block/mmcblk0p48' | tr -d '\r')
+		XNUSYS_DEV=$("${ADB[@]}" shell "[ -e /dev/block/by-name/xnusys ] && echo /dev/block/by-name/xnusys || echo /dev/block/mmcblk0p${XNUSYS_PART:-48}" | tr -d '\r')
 		TMP_SPLIT=$(mktemp -d)
 		split -b 512M -d -a 3 "$XNUSYS_IMG" "$TMP_SPLIT/part_"
 		SEEK_4M=0
