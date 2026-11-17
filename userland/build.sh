@@ -61,6 +61,9 @@
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 source ../xnu-env.sh
+if [ -z "${LDID:-}" ] && ! command -v ldid >/dev/null 2>&1 && [ -x "$THEOS/toolchain/linux/iphone/bin/ldid" ]; then
+	export LDID="$THEOS/toolchain/linux/iphone/bin/ldid"
+fi
 # Three things GNU coreutils has and macOS has not: a tree of hard links (cp -al; Sonoma's cp fails on every
 # file of one, "Bad file descriptor"), sha256sum, and stat -c
 linktree() { # linktree DIR NEW: NEW (which is not there yet) becomes DIR's tree, every file a hard link
@@ -192,12 +195,12 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -O2 -o obj/camera_test src/camera_test.c src/camera_isp.c
 		$DYN -fobjc-arc -framework Foundation -framework CoreBluetooth -sectcreate __TEXT __info_plist src/bt_test.plist \
 			-o obj/bt_test src/bt_test.m &&
-			{ ${LDID:-ldid} -Ssrc/bt_test.entitlements obj/bt_test 2>/dev/null ||
+			{ "${LDID:-ldid}" -Ssrc/bt_test.entitlements obj/bt_test 2>/dev/null ||
 			  echo "build.sh: no ldid: bt_test is unsigned, and TCC may not let it use Bluetooth"; }
 		$DYN -fobjc-arc -framework Foundation -framework AVFoundation -o obj/camera_avtest src/camera_avtest.m
 		# (the microphone as an application records: allowed to, by an entitlement, if ldid is there)
 		$DYN -framework CoreFoundation -framework AVFoundation -lobjc -o obj/record_test src/record_test.c &&
-			{ ${LDID:-ldid} -Ssrc/record_test.entitlements obj/record_test 2>/dev/null ||
+			{ "${LDID:-ldid}" -Ssrc/record_test.entitlements obj/record_test 2>/dev/null ||
 			  echo "build.sh: no ldid: record_test is unsigned, and the system may not let it record"; }
 		$DYN -o obj/cpu_test src/cpu_test.c
 		$DYN -framework CoreFoundation -framework IOSurface -o obj/cow_test src/cow_test.c
@@ -239,15 +242,15 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 		$DYN -fobjc-arc -framework Foundation -framework CoreGraphics -framework ImageIO -llockdown -o obj/screenshotr src/screenshotr.m
 		# (with an entitlement for "battery_test open URL", if ldid is there: src/battery_test.c)
 		$DYN -framework CoreFoundation -framework IOKit -lsqlite3 -o obj/battery_test src/battery_test.c &&
-			{ ${LDID:-ldid} -Ssrc/battery_test.entitlements obj/battery_test 2>/dev/null ||
+			{ "${LDID:-ldid}" -Ssrc/battery_test.entitlements obj/battery_test 2>/dev/null ||
 			  echo "build.sh: no ldid: battery_test is unsigned, and SpringBoard will not open URLs for it"; }
 		# (the keychain answers only a program that has a keychain access group: signed with one, if ldid is there)
 		$DYN -framework CoreFoundation -framework Security -o obj/keychain_test src/keychain_test.c &&
-			{ ${LDID:-ldid} -Ssrc/keychain_test.entitlements obj/keychain_test 2>/dev/null ||
+			{ "${LDID:-ldid}" -Ssrc/keychain_test.entitlements obj/keychain_test 2>/dev/null ||
 			  echo "build.sh: no ldid: keychain_test is unsigned, and the keychain will refuse it (-34018)"; }
 		# (and wifid's way of keeping a network's password, by wifid's name: src/wifipw_test.c)
 		$DYN -framework CoreFoundation -framework Security -o obj/wifipw_test src/wifipw_test.c &&
-			{ ${LDID:-ldid} -Ssrc/wifipw_test.entitlements obj/wifipw_test 2>/dev/null ||
+			{ "${LDID:-ldid}" -Ssrc/wifipw_test.entitlements obj/wifipw_test 2>/dev/null ||
 			  echo "build.sh: no ldid: wifipw_test is unsigned, and the keychain will refuse it (-34018)"; }
 		# (aks_restore makes /private/var/keybags/systembag.kb before launchd for keybagd/bluetoothd)
 		$DYN -framework CoreFoundation -framework IOKit -o obj/aks_restore src/aks_restore.c

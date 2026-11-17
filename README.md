@@ -46,7 +46,7 @@ Captured directly from a Redmi Note 9 (`merlinx`) over USB using `idevicescreens
 ### Requirements
 - **Phone:** Xiaomi Redmi Note 9 (`merlinx`, 3 GB / 4 GB RAM, 64 GB / 128 GB eMMC) with an **unlocked bootloader** and **custom recovery with root ADB** (TWRP, OrangeFox, PitchBlack, SHRP, etc.).
 - **PC:** Linux `x86_64` with **~18–20 GB free disk space** during build (~2 GB after optional post-install cleanup) and a USB cable.
-- **Signing:** `ldid` on `PATH`, or `LDID` set to a compatible signing executable. It signs the keybag helper required for boot.
+- **Signing:** `ldid` in the standard Theos Linux toolchain or on `PATH`. Alternatively, set `LDID` to a compatible signing executable. It signs the keybag helper required for boot.
 
 ### Step-by-Step
 1. **Clone the repository:**
