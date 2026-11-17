@@ -9,7 +9,6 @@ DO_FORMAT=0
 DO_REBOOT=0
 DRY_RUN=0
 YES_CONFIRMED=0
-RAW_MODE=0   # 1 after --repartition: the recovery's kernel still has the OLD partition table, so address the disk by sector offsets
 ADB_SERIAL=""
 
 usage() {
@@ -200,23 +199,33 @@ PY
 		echo "Please send the table printed above when asking for help." >&2
 		exit 1
 	fi
-	run_adb shell "partprobe /dev/block/mmcblk0 2>/dev/null || blockdev --rereadpt /dev/block/mmcblk0 2>/dev/null || true"
-	sleep 1
-	# The partitions of Android's old layout are still mounted or held (dynamic partitions), so the kernel usually
-	# keeps the old table. Formatting and flashing therefore go to the whole disk at the new offsets.
-	RAW_MODE=1
+	# Android's old partitions are still mounted or held in this recovery, so the kernel keeps the old table and
+	# the new partitions have no device nodes. Rebooting the recovery makes it read the table that was just saved.
+	echo "== Rebooting the recovery to load the new partition table =="
+	run_adb reboot recovery
+	if [ "$DRY_RUN" -eq 0 ]; then
+		sleep 10
+		RECOVERY_UP=0
+		for _ in $(seq 1 90); do
+			if "${ADB[@]}" shell "[ -e /dev/block/by-name/iosdata ] && [ -e /dev/block/by-name/xnusys ]" >/dev/null 2>&1; then
+				RECOVERY_UP=1
+				break
+			fi
+			sleep 2
+		done
+		if [ "$RECOVERY_UP" -ne 1 ]; then
+			echo "Error: the recovery did not come back with the new partitions." >&2
+			echo "The partition table is saved. Boot the phone into recovery by hand, then run:" >&2
+			echo "  ./setup-merlinx.sh   (or: bash tools/install-merlinx.sh --format-iosdata --xnusys <system.apfs> --boot <boot-ios.img> --reboot)" >&2
+			exit 1
+		fi
+		echo "Recovery is back; new partitions are visible."
+	fi
 fi
 
 if [ "$DO_FORMAT" -eq 1 ]; then
-	if [ "$RAW_MODE" -eq 1 ]; then
-		echo "== Formatting iosdata as ext2 (sectors ${IOSDATA_START}..${IOSDATA_END}) =="
-		IOSDATA_BLOCKS=$(( (IOSDATA_END - IOSDATA_START + 1) / 8 ))
-		IOSDATA_OFFSET=$(( IOSDATA_START * 512 ))
-		run_adb shell "mke2fs -t ext2 -b 4096 -F -F -L iosdata -E offset=${IOSDATA_OFFSET} /dev/block/mmcblk0 ${IOSDATA_BLOCKS}"
-	else
-		echo "== Formatting /dev/block/by-name/iosdata as ext2 =="
-		run_adb shell "IOSDATA_DEV=/dev/block/by-name/iosdata; [ -e \"\$IOSDATA_DEV\" ] || IOSDATA_DEV=/dev/block/mmcblk0p43; umount \"\$IOSDATA_DEV\" 2>/dev/null || true; (command -v mke2fs >/dev/null && mke2fs -t ext2 -b 4096 -F -L iosdata \"\$IOSDATA_DEV\") || mkfs.ext2 -b 4096 -F -L iosdata \"\$IOSDATA_DEV\""
-	fi
+	echo "== Formatting /dev/block/by-name/iosdata as ext2 =="
+	run_adb shell "IOSDATA_DEV=/dev/block/by-name/iosdata; [ -e \"\$IOSDATA_DEV\" ] || IOSDATA_DEV=/dev/block/mmcblk0p43; umount \"\$IOSDATA_DEV\" 2>/dev/null || true; (command -v mke2fs >/dev/null && mke2fs -t ext2 -b 4096 -F -L iosdata \"\$IOSDATA_DEV\") || mkfs.ext2 -b 4096 -F -L iosdata \"\$IOSDATA_DEV\""
 fi
 
 if [ -n "$XNUSYS_IMG" ]; then
@@ -224,34 +233,19 @@ if [ -n "$XNUSYS_IMG" ]; then
 		echo "Error: xnusys image not found: $XNUSYS_IMG" >&2
 		exit 1
 	fi
-	if [ "$RAW_MODE" -eq 1 ]; then
-		XNUSYS_TARGET=/dev/block/mmcblk0
-		XNUSYS_BASE=$(( XNUSYS_START * 512 ))
-	else
-		XNUSYS_TARGET=""
-		XNUSYS_BASE=0
-	fi
-	echo "== Flashing $XNUSYS_IMG to xnusys =="
+	echo "== Flashing $XNUSYS_IMG to /dev/block/by-name/xnusys =="
 	if [ "$DRY_RUN" -eq 1 ]; then
-		echo "[dry-run] split 512M + ${ADB[*]} push /tmp/xnusys.part + dd of=${XNUSYS_TARGET:-/dev/block/by-name/xnusys} (byte offset $XNUSYS_BASE)"
+		echo "[dry-run] split 512M + ${ADB[*]} push /tmp/xnusys.part + dd of=/dev/block/by-name/xnusys bs=4M seek=..."
 	else
-		if [ -z "$XNUSYS_TARGET" ]; then
-			XNUSYS_TARGET=$("${ADB[@]}" shell "[ -e /dev/block/by-name/xnusys ] && echo /dev/block/by-name/xnusys || echo /dev/block/mmcblk0p${XNUSYS_PART:-48}" | tr -d '\r')
-		fi
-		# the biggest dd block size that divides every write offset (chunks are 512 MiB apart)
-		DD_BS=512
-		for cand in 4194304 1048576 4096; do
-			if [ $(( XNUSYS_BASE % cand )) -eq 0 ]; then DD_BS=$cand; break; fi
-		done
+		XNUSYS_DEV=$("${ADB[@]}" shell "[ -e /dev/block/by-name/xnusys ] && echo /dev/block/by-name/xnusys || echo /dev/block/mmcblk0p${XNUSYS_PART:-48}" | tr -d '\r')
 		TMP_SPLIT=$(mktemp -d)
 		split -b 512M -d -a 3 "$XNUSYS_IMG" "$TMP_SPLIT/part_"
-		CHUNK=0
+		SEEK_4M=0
 		for part in "$TMP_SPLIT"/part_*; do
-			OFFSET=$(( XNUSYS_BASE + CHUNK * 536870912 ))
-			echo "  flashing $(basename "$part") at offset $(( CHUNK * 512 )) MiB..."
+			echo "  flashing $(basename "$part") at offset $((SEEK_4M * 4)) MiB..."
 			"${ADB[@]}" push "$part" /tmp/xnusys.part
-			"${ADB[@]}" shell "dd if=/tmp/xnusys.part of=\"$XNUSYS_TARGET\" bs=$DD_BS seek=$(( OFFSET / DD_BS )) conv=notrunc && rm -f /tmp/xnusys.part" || { echo "Error: flashing chunk $(basename "$part") failed." >&2; exit 1; }
-			CHUNK=$(( CHUNK + 1 ))
+			"${ADB[@]}" shell "dd if=/tmp/xnusys.part of=\"$XNUSYS_DEV\" bs=4M seek=$SEEK_4M conv=notrunc && rm -f /tmp/xnusys.part"
+			SEEK_4M=$((SEEK_4M + 128))
 		done
 		"${ADB[@]}" shell "sync"
 		rm -rf "$TMP_SPLIT"
