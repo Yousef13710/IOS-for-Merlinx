@@ -50,6 +50,8 @@ Captured directly from a Redmi Note 9 (`merlinx`) over USB using `idevicescreens
 
 The installer shows download progress, completed flash chunks, and elapsed time for builds. Detailed command output is saved in `.setup-logs/`; the menu displays the combined session log path, and individual build and flash logs are kept there as well.
 
+When an update changes files on the system image, choose **Update System and Boot**. It rebuilds and flashes `xnusys` and the boot image while preserving `iosdata`; it may need to download and extract the iOS filesystem again.
+
 ### Step-by-Step
 1. **Clone the repository:**
    ```bash

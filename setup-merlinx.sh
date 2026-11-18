@@ -311,7 +311,8 @@ if b'XNUP' in d:
 
 # Build steps
 step_fetch_ios() {
-	if [ -d "$ROOT/ios165/rootfs/usr/sbin" ] && [ -f "$ROOT/ios165/rootfs/sbin/launchd" ]; then
+	if [ -d "$ROOT/ios165/rootfs/usr/sbin" ] && [ -f "$ROOT/ios165/rootfs/sbin/launchd" ] &&
+	   [ -f "$ROOT/ios165/.done-rootfs" ] && [ ! "$ROOT/ios165/select-system.py" -nt "$ROOT/ios165/.done-rootfs" ]; then
 		ok "iOS 16.5 (20F66) already extracted in ios165/rootfs (skipping)"
 		return 0
 	fi
@@ -461,6 +462,22 @@ action_update_boot() {
 	ok "Updated boot-ios.img and rebooted!"
 }
 
+action_update_system() {
+	clear_screen
+	banner
+	info "Update System and Boot (replaces xnusys and boot; keeps iosdata)"
+	connect_recovery || return 1
+	build_all || return 1
+	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" --serial "$ADB_SERIAL" \
+		--xnusys "$ROOT/userland/system.apfs" --boot "$ROOT/boot-ios.img" --reboot || {
+		cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"
+		fail "System/boot update failed. Details: $LOG_DIR/flash.log"
+		return 1
+	}
+	cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"
+	ok "Updated system and boot images and rebooted."
+}
+
 action_repair_iosdata() {
 	clear_screen
 	banner
@@ -482,9 +499,10 @@ main_menu() {
 		echo "    4) Repair iosdata (run e2fsck -y in recovery)"
 		echo "    5) Run Host & Recovery Diagnostics"
 		echo "    6) Clean Up Build/Fetch Artifacts (free ~8 GB disk space)"
+		echo "    7) Update System and Boot (keeps iosdata; rebuilds and flashes xnusys)"
 		echo "    q) Quit"
 		echo ""
-		read -r -p "Choice [1-6/q]: " choice
+		read -r -p "Choice [1-7/q]: " choice
 		case "$choice" in
 			1) action_full_install || true; pause_enter ;;
 			2) action_update_boot || true; pause_enter ;;
@@ -492,6 +510,7 @@ main_menu() {
 			4) action_repair_iosdata || true; pause_enter ;;
 			5) check_host || true; echo ""; connect_recovery || true; pause_enter ;;
 			6) action_cleanup_artifacts || true; pause_enter ;;
+			7) action_update_system || true; pause_enter ;;
 			q|Q) exit 0 ;;
 			*) warn "Invalid choice"; sleep 1 ;;
 		esac

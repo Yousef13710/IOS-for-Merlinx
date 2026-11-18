@@ -133,6 +133,11 @@ def mode_bits(text):
 
 
 def wanted_file(path, size):
+    # Files' on-device provider is an executable inside a framework plug-in,
+    # not Support/. It exceeds SMALL but is needed for the local Files domain.
+    if path == ('System/Library/Frameworks/FileProvider.framework/PlugIns/'
+                'LocalStorageFileProvider.appex/LocalStorageFileProvider'):
+        return True
     lproj = re.search(r'/([^/]+)\.lproj/', path)
     if lproj and lproj.group(1) not in KEEP_LANG:
         return False
