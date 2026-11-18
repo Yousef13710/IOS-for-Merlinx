@@ -1,7 +1,7 @@
 #!/bin/bash
 # Boot the whole system under QEMU: the big system image preloaded at the loader's resident
 # address (it becomes /dev/md0, the root) and the small image in the payload (/dev/md1), the
-# same arrangement `xl ramdisk` + `xl run` make on the phone.
+# system and root images supplied separately to the emulated loader.
 # usage: run-ios.sh [seconds] [extra qemu args...]
 # env: ROOT=<small image>, IMG=<system image>, CMDLINE=<extra boot-args>
 #      QEMU_RAM_GB=<n>     the guest's RAM, default 7: memory then ends where the phone's does and the

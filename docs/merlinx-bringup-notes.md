@@ -4,7 +4,7 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
 
 ## 1. Safety & Milestone Backups
 - `/home/devnull/IOS/working-safe` is never modified.
-- Milestone backup: `/home/devnull/IOS/working-step5f/boot-step5f-aksbt.img` (with `SHA256SUMS`).
+- Historical milestone: the step 5f backup mentioned in earlier notes has been removed.
 
 ## 2. Display & GPU Optimizations
 - **Verbose console off (`-DXNU_VERBOSE=0`):** Disables `-v` text console over the UI (`v_display = 1` in `mtkloader.c`) while preserving `debug=0x8` and pstore `console-ramoops`.
@@ -27,7 +27,7 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
 - **Fix for `/redwood/bin/tolog: No such file or directory`:** Built and copied `obj/tolog` unconditionally in `userland/build.sh` (previously gated on `METAL=1`). Fixed `aks_restore` and `keybagd --init` (`-25291` Identity Root error).
 
 ## 4. Wi-Fi & Bluetooth (`connsys_step=17`, `connsys_bt=2`, `bluetoothd`, `BlueTool`, `tccd`, `keybagd`)
-- **Wi-Fi (`connsys_step=17`, `WIFID=1`):** Scans and discovers nearby Wi-Fi networks, but **does not yet connect/associate**.
+- **Wi-Fi (`connsys_step=17`, `WIFID=1`):** Scans and connects to Wi-Fi networks; association was later verified on device.
 - **`bluetoothd` HCI fixes (`xnu/files/bsd/dev/redwood_connsys.c`):**
   - `OI_HCICMD_WriteDefaultErroneousDataReporting` (`0x0c5b`) failed locally with `status=628` because `Read_Local_Supported_Commands` octet 18 was `0x83` (missing bits 2 & 3). Added `packet[7 + 18] |= 0x0c;` and expanded the `0x0c5b` quirk to match any non-zero `0x0e`/`0x0f` response.
   - `0x200b` (`LE_Set_Scan_Parameters`) and `0x200c` (`LE_Set_Scan_Enable`) returned `0x0c` (`Command Disallowed`). Rewrote `04 0e 04 01 0b/0c 20 0c` to `status=0x00`.
@@ -62,7 +62,7 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
   - Deferred `ext2_sync_node`/`ext2_flush_meta` in `ext2_write` (only on `IO_SYNC`, `fsync`, `sync`, `inactive`, `reclaim`, `unmount`) and `ext2_pageout`.
   - Fixed `ext2_vget_locked()` `em_lock` race condition, added 32 MB (`8192`-block) write-back cache, 128 KB `ext2_bcache_flush_run` coalescing, `bc_ino` per-inode `fsync`, 32 KB `em_ra_buf` read-ahead, and `em_grp_hint` O(1) block allocator.
   - Dynamically allocated `em_bcache_hash` (`Z_WAITOK | Z_ZERO`), `em_io_buf` (128 KB), `em_ra_buf` (32 KB), `em_grp_hint`, and `em_bmap_buf` via `kalloc_data` to avoid `KALLOC_SAFE_ALLOC_SIZE` + `Z_NOFAIL` early-boot panics.
-  - Verified on device: boots in **~2.5–3 min** (`~2 min 40 s` measured, down from ~30 min), un-chopped icons; currently no wallpaper, laggy UI/apps, and `Settings → General → About` crashes in `Preferences`.
+  - Verified on device: boots in **~2.5–3 min** (`~2 min 40 s` measured, down from ~30 min), un-chopped icons; currently no wallpaper, laggy UI/apps, at that time, and `Settings → General → About` crashed in `Preferences`. About now opens, though free-space reporting remains incorrect.
 - **Userland (`userland/src/init.c`):**
   - `mount_writable()` mounts `/dev/emmc1` (`ext2`) on `/private/var` (falling back to `ramfs`, or `no_ext2=1` boot-arg to force `ramfs`), treats `EEXIST` on `mkdir` as success, and skips overwriting existing files.
 - **Bootloader (`mtkloader/mtkloader.c`):**

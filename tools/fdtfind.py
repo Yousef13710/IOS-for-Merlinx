@@ -4,7 +4,7 @@ Print the nodes of a flattened device tree whose path, compatible or properties 
 
   fdtfind.py <file.dtb> <word> [...]
 
-For looking at the phone's own Android device tree without the phone in hand (prebuilt/uefi).
+For looking at the phone's own Android device tree from a device-tree file.
 """
 import struct
 import sys

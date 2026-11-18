@@ -6,11 +6,7 @@
 !/README.md
 !/README.ru.md
 !/docs/
-!/xl
-!/xl_x6826b
 !/mkpackfs.py
-!/mkxnuimg.py
-!/mkxnuimg_x6826b.py
 !/xnu-build.sh
 !/xnu-env.sh
 !/xnuloader/
@@ -21,7 +17,6 @@
 !/ios165/
 !/xnu/
 !/xnu-deps/
-!/uefi/
 !/prebuilt/
 !/wifi/
 !/firmware/

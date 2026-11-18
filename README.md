@@ -33,7 +33,7 @@ Captured directly from a Redmi Note 9 (`merlinx`) over USB using `idevicescreens
 | **Rear Camera & Battery** | Partial / Working | Rear `s5kgm1sp` live preview in `Camera.app` (currently laggy/tearing); real battery percentage in status bar |
 
 ### Known Limitations
-- **Not yet working:** Safari/WebKit rendering, `Settings → General → About` (crashes `Preferences`), live `PosterBoard` wallpapers, and extra USB services (`afcd`, `os_trace_relay`, `mobile_installation_proxy`).
+- **Not yet working:** Safari/WebKit rendering, accurate free-space reporting and the local location in Files → Browse, live `PosterBoard` wallpapers, and extra USB services (`afcd`, `os_trace_relay`, `mobile_installation_proxy`).
 - **Unsupported / not ported:** Front camera, speaker/mic audio, cellular/baseband, `ext4` (`iosdata` uses `ext2`), and Apple online services (activation, iCloud, App Store — no Secure Enclave).
 
 ---

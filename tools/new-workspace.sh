@@ -12,7 +12,7 @@
 # (refs/redwood/baseline in the copy's kernel tree): tools/kernel-delta.sh, run in the workspace,
 # prints what was changed in the kernel since. Files below ios165/rootfs, ios165/cryptex and
 # ios165/cryptex-app are hard links to this copy's: replace them, never edit them in place.
-# The phone is not part of a workspace: there is one, and ./xl belongs to the main copy.
+# The phone is shared between workspaces; use the main copy for device operations.
 set -e
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
 NAME=${1:?usage: new-workspace.sh NAME INSTANCE [DIR]}
