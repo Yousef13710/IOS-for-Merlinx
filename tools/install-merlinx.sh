@@ -69,7 +69,7 @@ run_adb() {
 }
 
 echo "== Checking Recovery ADB connection =="
-STATE=$("${ADB[@]}" get-state 2>/dev/null || true)
+STATE=$("${ADB[@]}" get-state 2>/dev/null | tr -d '\r' || true)
 if [ "$STATE" != "recovery" ] && [ "$STATE" != "device" ]; then
 	echo "Error: device must be booted into recovery with root ADB (got state: '${STATE:-none}')." >&2
 	exit 1

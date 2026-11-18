@@ -188,7 +188,7 @@ connect_recovery() {
 		fi
 
 		local state
-		state=$(adb_cmd get-state 2>/dev/null || true)
+		state=$(adb_cmd get-state 2>/dev/null | tr -d '\r' || true)
 		if [ "$state" = "unauthorized" ]; then
 			warn "Device $ADB_SERIAL is 'unauthorized'. Accept the ADB authorization prompt in recovery (or re-enable ADB)."
 			read -r -p "Press [Enter] to retry, or 'q' to cancel: " ans
