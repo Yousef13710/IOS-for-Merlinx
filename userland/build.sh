@@ -58,6 +58,7 @@
 #   CHECK=1          check every image (every container) as it is made: apfsck has to find it clean and
 #                    the kernel's apfs_lib has to read every volume back as the directory it was made of
 #                    (../tools/apfs/check-image.sh; the system image takes a few minutes more)
+#   FILEPROVIDER_DIAG=1  log the current user's registered Files providers at boot
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 source ../xnu-env.sh
@@ -566,6 +567,9 @@ with open(path, 'w') as f:
 	[ -n "$QUIET" ] && : > root/etc/quiet
 	# the jobs the iOS launchd will see (/System/Library/LaunchDaemons is a symlink to this directory)
 	cp com.redwood.demo.plist com.redwood.wifi.plist com.redwood.usbmux.plist root/LaunchDaemons/
+	if [ -n "${FILEPROVIDER_DIAG:-}" ]; then
+		cp com.redwood.fileprovider-diagnostic.plist root/LaunchDaemons/
+	fi
 	[ -n "$IOS_JOBS" ] && OSLOG=${OSLOG-com.apple.backboardd} ./mkjobs.py ${REST:+--rest} $IOS/rootfs root/LaunchDaemons $IOS_JOBS
 fi
 # firmware of the phone's own hardware, where somebody has pulled it from the phone's Android into ../fw-gpu
