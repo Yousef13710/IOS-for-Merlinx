@@ -1,6 +1,6 @@
 #!/bin/bash
 # Installer for HakiOS on Xiaomi Redmi Note 9 (merlinx, MT6768) via TWRP ADB.
-set -euo pipefail
+set -Eeuo pipefail
 
 BOOT_IMG=""
 XNUSYS_IMG=""
@@ -10,6 +10,11 @@ DO_REBOOT=0
 DRY_RUN=0
 YES_CONFIRMED=0
 ADB_SERIAL=""
+FLASH_LOG="${HAKIOS_FLASH_LOG:-$(cd "$(dirname "$0")/.." && pwd)/.setup-logs/flash-$(date +%Y%m%d-%H%M%S)-$$.log}"
+mkdir -p "$(dirname "$FLASH_LOG")"
+: > "$FLASH_LOG"
+echo "Detailed flash log: $FLASH_LOG"
+trap 'rc=$?; echo "Error: flash operation failed (exit $rc). See $FLASH_LOG for details." >&2' ERR
 
 usage() {
 	cat <<'EOF'
@@ -64,7 +69,10 @@ run_adb() {
 	if [ "$DRY_RUN" -eq 1 ]; then
 		echo "[dry-run] ${ADB[*]} $*"
 	else
-		"${ADB[@]}" "$@"
+		printf '\n+ adb' >> "$FLASH_LOG"
+		printf ' %q' "$@" >> "$FLASH_LOG"
+		printf '\n' >> "$FLASH_LOG"
+		"${ADB[@]}" "$@" >> "$FLASH_LOG" 2>&1
 	fi
 }
 
@@ -91,12 +99,12 @@ if [ "$DO_REPART" -eq 1 ]; then
 	# Read the GPT straight off the eMMC (the first 1 MiB) instead of parsing `sgdisk -p`: Android recoveries ship
 	# different sgdisk builds (some do not even know -p), but dd and adb pull always work.
 	GPT_HEAD=$(mktemp)
-	"${ADB[@]}" shell "dd if=/dev/block/mmcblk0 of=/tmp/gpt_head.bin bs=512 count=2048 2>/dev/null"
-	"${ADB[@]}" pull /tmp/gpt_head.bin "$GPT_HEAD" >/dev/null
-	"${ADB[@]}" shell "rm -f /tmp/gpt_head.bin"
+	"${ADB[@]}" shell "dd if=/dev/block/mmcblk0 of=/tmp/gpt_head.bin bs=512 count=2048 2>/dev/null" >> "$FLASH_LOG" 2>&1
+	"${ADB[@]}" pull /tmp/gpt_head.bin "$GPT_HEAD" >> "$FLASH_LOG" 2>&1
+	"${ADB[@]}" shell "rm -f /tmp/gpt_head.bin" >> "$FLASH_LOG" 2>&1
 	GPT_TOTAL=$("${ADB[@]}" shell "cat /sys/block/mmcblk0/size 2>/dev/null" | tr -d '\r\n ')
 	GPT_INFO=""
-	if ! read -r IOSDATA_START IOSDATA_END XNUSYS_START XNUSYS_END XNUSYS_PART DEL_LIST DISK_DESC < <(python3 - "$GPT_HEAD" "${GPT_TOTAL:-0}" <<'PY'
+	if ! read -r IOSDATA_START IOSDATA_END XNUSYS_START XNUSYS_END XNUSYS_PART DEL_LIST DISK_DESC < <(python3 - "$GPT_HEAD" "${GPT_TOTAL:-0}" 2>> "$FLASH_LOG" <<'PY'
 import struct, sys
 
 data = open(sys.argv[1], "rb").read()
@@ -164,7 +172,7 @@ print(iosdata_start, iosdata_end, xnusys_start, xnusys_end, xnusys_part, dels, d
 PY
 ); then
 		rm -f "$GPT_HEAD"
-		echo "Error: could not compute the partition layout (see above). Nothing was changed on the phone." >&2
+		echo "Error: could not compute the partition layout; see $FLASH_LOG. Nothing was changed on the phone." >&2
 		exit 1
 	fi
 	rm -f "$GPT_HEAD"
@@ -196,7 +204,7 @@ PY
 	SG_ARGS="$SG_ARGS --new=${XNUSYS_PART}:${XNUSYS_START}:${XNUSYS_END} --change-name=${XNUSYS_PART}:xnusys --typecode=${XNUSYS_PART}:8300"
 	if ! run_adb shell "sgdisk $SG_ARGS /dev/block/mmcblk0"; then
 		echo "Error: sgdisk could not create the partitions; the partition table was NOT changed." >&2
-		echo "Please send the table printed above when asking for help." >&2
+		echo "Please include $FLASH_LOG when asking for help." >&2
 		exit 1
 	fi
 	# Android's old partitions are still mounted or held in this recovery, so the kernel keeps the old table and
@@ -239,15 +247,22 @@ if [ -n "$XNUSYS_IMG" ]; then
 	else
 		XNUSYS_DEV=$("${ADB[@]}" shell "[ -e /dev/block/by-name/xnusys ] && echo /dev/block/by-name/xnusys || echo /dev/block/mmcblk0p${XNUSYS_PART:-48}" | tr -d '\r')
 		TMP_SPLIT=$(mktemp -d)
+		echo "Preparing image chunks..."
 		split -b 512M -d -a 3 "$XNUSYS_IMG" "$TMP_SPLIT/part_"
 		SEEK_4M=0
+		TOTAL_BYTES=$(wc -c < "$XNUSYS_IMG")
+		DONE_BYTES=0
 		for part in "$TMP_SPLIT"/part_*; do
-			echo "  flashing $(basename "$part") at offset $((SEEK_4M * 4)) MiB..."
-			"${ADB[@]}" push "$part" /tmp/xnusys.part
-			"${ADB[@]}" shell "dd if=/tmp/xnusys.part of=\"$XNUSYS_DEV\" bs=4M seek=$SEEK_4M conv=notrunc && rm -f /tmp/xnusys.part"
+			echo "  Transferring and writing chunk at $((SEEK_4M * 4)) MiB..."
+			"${ADB[@]}" push "$part" /tmp/xnusys.part >> "$FLASH_LOG" 2>&1
+			"${ADB[@]}" shell "dd if=/tmp/xnusys.part of=\"$XNUSYS_DEV\" bs=4M seek=$SEEK_4M conv=notrunc && rm -f /tmp/xnusys.part" >> "$FLASH_LOG" 2>&1
+			DONE_BYTES=$((DONE_BYTES + $(wc -c < "$part")))
+			PERCENT=$((DONE_BYTES * 100 / TOTAL_BYTES))
+			FILLED=$((PERCENT / 5))
+			printf '  ['; printf '%*s' "$FILLED" '' | tr ' ' '#'; printf '%*s' "$((20 - FILLED))" '' | tr ' ' '-'; printf '] %d%% written\n' "$PERCENT"
 			SEEK_4M=$((SEEK_4M + 128))
 		done
-		"${ADB[@]}" shell "sync"
+		"${ADB[@]}" shell "sync" >> "$FLASH_LOG" 2>&1
 		rm -rf "$TMP_SPLIT"
 	fi
 fi
@@ -258,8 +273,15 @@ if [ -n "$BOOT_IMG" ]; then
 		exit 1
 	fi
 	echo "== Flashing $BOOT_IMG to /dev/block/by-name/boot =="
+	echo "  [----------] 0/2: transferring boot image"
 	run_adb push "$BOOT_IMG" /tmp/boot.img
+	echo "  [#####-----] 1/2: writing and syncing boot partition"
 	run_adb shell "dd if=/tmp/boot.img of=/dev/block/by-name/boot bs=4M && sync && rm -f /tmp/boot.img"
+	if [ "$DRY_RUN" -eq 1 ]; then
+		echo "  [dry-run] Boot image was not written."
+	else
+		echo "  [##########] 2/2: boot image written"
+	fi
 fi
 
 if [ "$DO_REBOOT" -eq 1 ]; then

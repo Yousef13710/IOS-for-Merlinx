@@ -57,26 +57,57 @@ def directory():
         p += 46 + nl + el + cl
 
 
-def download(data, method, csize, output):
+def progress(member, done, total):
+    """Report actual downloaded archive bytes to the installer, if requested."""
+    path = os.environ.get('HAKIOS_PROGRESS_FILE')
+    if not path or not total:
+        return
+    done = min(done, total)
+    percent = done * 100 // total
+    filled = percent // 5
+    try:
+        with open(path, 'w') as status:
+            status.write(f'Downloading {member}: [{"#" * filled}{"-" * (20 - filled)}] '
+                         f'{percent}% ({done / 2**20:.0f}/{total / 2**20:.0f} MiB)')
+    except OSError:
+        pass
+
+
+def download(data, method, csize, output, member):
     """One attempt at the member whose bytes start at DATA in the archive; returns the size of OUTPUT."""
     if method == 0:
         have = os.path.getsize(output) if os.path.exists(output) else 0
         if have > csize:
             have = 0
+        progress(member, have, csize)
+        last_update = 0
         if have < csize:
             with fetch(data + have, data + csize - 1) as stream, open(output, 'ab' if have else 'wb') as out:
                 while chunk := stream.read(1 << 20):
                     out.write(chunk)
+                    have += len(chunk)
+                    if time.monotonic() - last_update >= 1:
+                        progress(member, have, csize)
+                        last_update = time.monotonic()
+        progress(member, have, csize)
         return os.path.getsize(output)
     inflater = zlib.decompressobj(-15)
     written = 0
+    downloaded = 0
+    last_update = 0
+    progress(member, 0, csize)
     with fetch(data, data + csize - 1) as stream, open(output, 'wb') as out:
         while chunk := stream.read(1 << 20):
+            downloaded += len(chunk)
+            if time.monotonic() - last_update >= 1:
+                progress(member, downloaded, csize)
+                last_update = time.monotonic()
             chunk = inflater.decompress(chunk)
             out.write(chunk)
             written += len(chunk)
         tail = inflater.flush()
         out.write(tail)
+    progress(member, downloaded, csize)
     return written + len(tail)
 
 
@@ -93,7 +124,7 @@ def main():
         written = -1
         for attempt in range(1, ATTEMPTS + 1):
             try:
-                written = download(data, method, csize, output)
+                written = download(data, method, csize, output, member)
             except (OSError, http.client.HTTPException, zlib.error) as error:
                 print(f'{member}: {error}', file=sys.stderr)
             if written == usize:

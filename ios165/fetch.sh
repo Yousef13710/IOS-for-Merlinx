@@ -26,6 +26,11 @@ CRYPTEX_DMG=096-04666-078.dmg                   # the OS cryptex: dyld shared ca
 APP_CRYPTEX_DMG=096-03536-083.dmg               # the App cryptex (BuildManifest: Cryptex1,AppOS)
 CACHE=20F66__iPhone10,3_6
 UNZBM=../xnu-deps/host/bin/unzbm
+show_phase() {
+	if [ -n "${HAKIOS_PROGRESS_FILE:-}" ]; then
+		printf '%s' "$1" > "$HAKIOS_PROGRESS_FILE"
+	fi
+}
 
 for tool in python3 cc; do
 	command -v $tool >/dev/null || { echo "fetch.sh: $tool is not installed"; exit 1; }
@@ -52,10 +57,12 @@ if [ ! -f .done-rootfs ] || [ select-system.py -nt .done-rootfs ]; then
 		mv rootfs.dmg.part rootfs.dmg
 	fi
 	echo "fetch.sh: listing the image"
+	show_phase "Inspecting the iOS filesystem image..."
 	"$SEVENZ" l -slt rootfs.dmg > rootfs.slt
 	python3 select-system.py rootfs.slt system.files system.manifest
 	python3 mkvarskel.py rootfs.slt > var.skel
 	echo "fetch.sh: extracting $(wc -l < system.files) files"
+	show_phase "Extracting the iOS filesystem..."
 	rm -rf rootfs
 	"$SEVENZ" x -y -orootfs rootfs.dmg @system.files > extract-system.log
 	# the two fonts too big for the image as they are, made smaller in place (see select-system.py)
@@ -75,6 +82,7 @@ if [ ! -f .done-cryptex ]; then
 		mv cryptex-os.dmg.part cryptex-os.dmg
 	fi
 	echo "fetch.sh: extracting the cryptex"
+	show_phase "Extracting the OS cryptex and shared cache..."
 	rm -rf cryptex cryptex.cache $CACHE
 	# 7z reports every LZBITMAP file as an error ("Unsupported Method"): expected, unzbm_all checks the result
 	"$SEVENZ" x -y -ocryptex cryptex-os.dmg '-xr!com.apple.dyld' '-x!System/DriverKit' > extract-cryptex.log 2>&1 || true
@@ -99,6 +107,7 @@ if [ ! -f .done-cryptex-app ]; then
 		mv cryptex-app.dmg.part cryptex-app.dmg
 	fi
 	echo "fetch.sh: extracting the App cryptex"
+	show_phase "Extracting the App cryptex..."
 	rm -rf cryptex-app
 	"$SEVENZ" x -y -ocryptex-app cryptex-app.dmg > extract-cryptex-app.log 2>&1 || true
 	unzbm_all cryptex-app

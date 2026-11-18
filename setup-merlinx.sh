@@ -7,6 +7,8 @@ cd "$ROOT"
 
 LOG_DIR="$ROOT/.setup-logs"
 mkdir -p "$LOG_DIR"
+SESSION_LOG="$LOG_DIR/session-$(date +%Y%m%d-%H%M%S)-$$.log"
+: > "$SESSION_LOG"
 
 # Colors & ASCII UI helpers
 if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
@@ -71,11 +73,27 @@ run_step() {
 	echo ""
 	echo "${C_BOLD}==> $title${C_RESET}"
 	echo "${C_DIM}    Log: $logfile${C_RESET}"
-	if "$@" > >(tee "$logfile") 2>&1; then
+	local progress_file pid rc elapsed=0 progress
+	progress_file=$(mktemp "$LOG_DIR/progress.XXXXXX")
+	printf '\n== %s ==\n' "$title" >> "$SESSION_LOG"
+	HAKIOS_PROGRESS_FILE="$progress_file" "$@" > "$logfile" 2>&1 &
+	pid=$!
+	if [ -t 1 ]; then
+		while kill -0 "$pid" 2>/dev/null; do
+			progress=$(cat "$progress_file" 2>/dev/null || true)
+			printf '\r\033[K    %s  %s' "${progress:-Working...}" "(${elapsed}s)"
+			sleep 1
+			elapsed=$((elapsed + 1))
+		done
+		printf '\r\033[K'
+	fi
+	if wait "$pid"; then rc=0; else rc=$?; fi
+	cat "$logfile" >> "$SESSION_LOG"
+	rm -f "$progress_file"
+	if [ "$rc" -eq 0 ]; then
 		ok "$title"
 		return 0
 	else
-		local rc=$?
 		echo ""
 		fail "$title failed (exit $rc)"
 		echo "${C_YELLOW}--- Last 20 lines of $logfile ---${C_RESET}"
@@ -254,9 +272,13 @@ prepare_boot_container() {
 	info "Need an Android v2 boot.img header/DTB container for chainboot.py (pulled temporarily from phone, not saved as backup)."
 	connect_recovery || return 1
 	TMP_BOOT_CONTAINER=$(mktemp /tmp/hakios_boot_container.XXXXXX.img)
-	adb_cmd shell "dd if=/dev/block/by-name/boot of=/tmp/dev_boot.img bs=4M 2>/dev/null"
-	adb_cmd pull /tmp/dev_boot.img "$TMP_BOOT_CONTAINER" >/dev/null
-	adb_cmd shell "rm -f /tmp/dev_boot.img" >/dev/null || true
+	info "Reading the phone's boot container..."
+	if ! adb_cmd shell "dd if=/dev/block/by-name/boot of=/tmp/dev_boot.img bs=4M" >> "$SESSION_LOG" 2>&1 ||
+	   ! adb_cmd pull /tmp/dev_boot.img "$TMP_BOOT_CONTAINER" >> "$SESSION_LOG" 2>&1; then
+		fail "Could not read the boot container. Details: $SESSION_LOG"
+		return 1
+	fi
+	adb_cmd shell "rm -f /tmp/dev_boot.img" >> "$SESSION_LOG" 2>&1 || true
 
 	if python3 -c "
 import sys
@@ -293,18 +315,26 @@ step_fetch_ios() {
 		ok "iOS 16.5 (20F66) already extracted in ios165/rootfs (skipping)"
 		return 0
 	fi
-	run_step "Fetching & extracting iOS 16.5 (20F66)" "$LOG_DIR/fetch-ios165.log" bash "$ROOT/ios165/fetch.sh"
+	local rc=0 detail
+	run_step "Fetching & extracting iOS 16.5 (20F66)" "$LOG_DIR/fetch-ios165.log" bash "$ROOT/ios165/fetch.sh" || rc=$?
+	for detail in "$ROOT"/ios165/extract-{system,cryptex,dyld,cryptex-app}.log; do
+		if [ -f "$detail" ]; then
+			printf '\n== Extraction detail: %s ==\n' "$detail" >> "$SESSION_LOG"
+			cat "$detail" >> "$SESSION_LOG"
+		fi
+	done
+	return "$rc"
 }
 
 step_build_xnu() {
 	if [ ! -d "$ROOT/xnu-src/xnu-8796.121.2" ]; then
-		run_step "Applying XNU patches (xnu/apply.sh)" "$LOG_DIR/xnu-apply.log" bash "$ROOT/xnu/apply.sh"
+		run_step "Applying XNU patches (xnu/apply.sh)" "$LOG_DIR/xnu-apply.log" bash "$ROOT/xnu/apply.sh" || return 1
 	else
 		info "Syncing xnu/files/ into existing xnu-src/xnu-8796.121.2/"
 		cp -a "$ROOT/xnu/files/." "$ROOT/xnu-src/xnu-8796.121.2/"
 	fi
 	if [ ! -f "$ROOT/xnu-deps/sdk/iPhoneOS16.5.xnu.sdk/SDKSettings.plist" ] || [ ! -d "$ROOT/xnu-deps/host/bin" ]; then
-		run_step "Setting up XNU dependencies (xnu-deps/setup.sh)" "$LOG_DIR/xnu-deps.log" bash "$ROOT/xnu-deps/setup.sh"
+		run_step "Setting up XNU dependencies (xnu-deps/setup.sh)" "$LOG_DIR/xnu-deps.log" bash "$ROOT/xnu-deps/setup.sh" || return 1
 	else
 		ok "xnu-deps already set up (skipping)"
 	fi
@@ -330,11 +360,11 @@ step_pack_boot() {
 		python3 "$ROOT/xnuloader/mkpayload.py" -o "$ROOT/payload.bin" \
 		"kernel=$ROOT/xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837" \
 		"loader=$ROOT/prebuilt/loader.efi" \
-		"ramdisk=$ROOT/userland/root.apfs"
+		"ramdisk=$ROOT/userland/root.apfs" || return 1
 
 	run_step "Building mtkloader.bin" "$LOG_DIR/mtkloader.log" \
 		bash "$ROOT/mtkloader/build.sh" -DXNU_CORES=8 -DXNU_VERBOSE=0 \
-		'-DXNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 a75_mhz=2000 a55_mhz=1800 mali=1 mali_mhz=1050 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 fb_beat=0 vblur=0 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1 mtk_usb=1"'
+		'-DXNU_EXTRA_ARGS="cpus=8 small_cores_after=0 buttons=2 mtk_cpufreq=3 a75_mhz=2000 a55_mhz=1800 mali=1 mali_mhz=1050 fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1 fb_beat=0 vblur=0 aks_keys=1 mtkbatt=1 connsys_step=17 connsys_bt=2 touchscreen=3 touch_poll_us=2000 mtkcam_skel=1 mtk_usb=1"' || return 1
 
 	run_step "Creating boot-ios.img" "$LOG_DIR/chainboot.log" \
 		python3 "$ROOT/tools/chainboot.py" "$STOCK_BOOT_CONTAINER" "$ROOT/mtkloader/mtkloader.bin" "$ROOT/boot-ios.img" "$ROOT/payload.bin"
@@ -372,14 +402,15 @@ EOF
 
 	echo ""
 	info "Flashing & repartitioning device $ADB_SERIAL..."
-	bash "$ROOT/tools/install-merlinx.sh" \
+	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" \
 		--serial "$ADB_SERIAL" \
 		--repartition \
 		--yes \
 		--format-iosdata \
 		--xnusys "$ROOT/userland/system.apfs" \
 		--boot "$ROOT/boot-ios.img" \
-		--reboot || { fail "Flashing/repartitioning failed! Keeping build files so you can retry."; return 1; }
+		--reboot || { cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"; fail "Flashing/repartitioning failed! Details: $LOG_DIR/flash.log"; return 1; }
+	cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"
 	echo ""
 	ok "Installation complete! First boot takes ~2 minutes."
 	echo "  Tip: For future reboots, use 'idevicediagnostics restart' over USB so ext2 stays clean."
@@ -425,7 +456,8 @@ action_update_boot() {
 	step_build_xnu || return 1
 	step_build_userland || return 1
 	step_pack_boot || return 1
-	bash "$ROOT/tools/install-merlinx.sh" --serial "$ADB_SERIAL" --boot "$ROOT/boot-ios.img" --reboot || { fail "Flashing boot-ios.img failed!"; return 1; }
+	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" --serial "$ADB_SERIAL" --boot "$ROOT/boot-ios.img" --reboot || { cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"; fail "Flashing failed! Details: $LOG_DIR/flash.log"; return 1; }
+	cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"
 	ok "Updated boot-ios.img and rebooted!"
 }
 
@@ -442,6 +474,7 @@ main_menu() {
 	while true; do
 		clear_screen
 		banner
+		echo "  Detailed session log: $SESSION_LOG"
 		echo "  ${C_BOLD}Select an action:${C_RESET}"
 		echo "    1) Full Install (Fresh merlinx — ${C_RED}WIPES ALL DATA${C_RESET}, fetches, builds & flashes)"
 		echo "    2) Update Boot Image Only (rebuilds kernel/userland & flashes boot-ios.img)"

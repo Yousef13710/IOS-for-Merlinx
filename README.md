@@ -48,6 +48,8 @@ Captured directly from a Redmi Note 9 (`merlinx`) over USB using `idevicescreens
 - **PC:** Linux `x86_64` with **~18–20 GB free disk space** during build (~2 GB after optional post-install cleanup) and a USB cable.
 - **Signing:** `ldid` in the standard Theos Linux toolchain or on `PATH`. Alternatively, set `LDID` to a compatible signing executable. It signs the keybag helper required for boot.
 
+The installer shows download progress, completed flash chunks, and elapsed time for builds. Detailed command output is saved in `.setup-logs/`; the menu displays the combined session log path, and individual build and flash logs are kept there as well.
+
 ### Step-by-Step
 1. **Clone the repository:**
    ```bash
