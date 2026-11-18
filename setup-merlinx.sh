@@ -351,7 +351,7 @@ step_build_mesa() {
 
 step_build_userland() {
 	run_step "Building userland (root.apfs + system.apfs)" "$LOG_DIR/userland-build.log" \
-		bash -c 'cd "$1/userland" && DRIVERS="softpipe,panfrost" GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd com.apple.mobile.lockdown com.apple.timed" OSLOG="" bash build.sh' _ "$ROOT"
+		bash -c 'cd "$1/userland" && DRIVERS="softpipe,panfrost" GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd com.apple.medialibraryd com.apple.FileProvider com.apple.assetsd com.apple.mobile.lockdown com.apple.timed" OSLOG="" bash build.sh' _ "$ROOT"
 }
 
 step_pack_boot() {

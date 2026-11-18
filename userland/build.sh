@@ -535,6 +535,10 @@ with open(path, 'w') as f:
 	# the prefix with the root on the flash, downloads every package and index there, and without it each
 	# download ended in "No such file or directory"
 	printf 'd\t700\t501\t501\t/private/var/mobile/tmp\n' >> root/etc/var.skel
+	# The template omits the media library's parents. Create directories only;
+	# medialibraryd owns database creation, and existing user data is preserved.
+	printf 'd\t750\t501\t501\t/private/var/mobile/Media/iTunes_Control\n' >> root/etc/var.skel
+	printf 'd\t750\t501\t501\t/private/var/mobile/Media/iTunes_Control/iTunes\n' >> root/etc/var.skel
 	# A key of ours for root, when there is one: ssh/authorized_keys, never in the repository (like
 	# fw-*). dropbear from the package manager's prefix reads it and lets us in over the phone's
 	# Wi-Fi, which saves rebuilding an image for every question one wants to ask a running iOS. It
