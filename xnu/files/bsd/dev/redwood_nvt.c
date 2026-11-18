@@ -387,6 +387,17 @@ static bool down[MAX_FINGERS];
 static uint32_t last_x[MAX_FINGERS], last_y[MAX_FINGERS];
 static unsigned touch_events;
 
+/* Idle event reads can be all 0xff even while this firmware responds normally. */
+static bool
+nvt_firmware_responds(uint32_t event_buf_addr)
+{
+	uint8_t fw_info[2] = {0};
+
+	nvt_read_addr(event_buf_addr | 0x78, fw_info, sizeof(fw_info));
+	nvt_set_page(event_buf_addr);
+	return fw_info[0] != 0 && (uint8_t)(fw_info[0] + fw_info[1]) == 0xff;
+}
+
 static void
 nvt_recover_and_reinit(uint32_t event_buf_addr)
 {
@@ -419,6 +430,7 @@ nvt_thread(__unused void *parameter, __unused wait_result_t result)
 	uint32_t event_buf_addr = 0x21C00; /* NT36672A default */
 	bool last_irq_state = true;
 	uint32_t bad_reads = 0;
+	uint32_t idle_ff_grace = 0;
 
 	PE_parse_boot_argn("touch_poll_us", &poll_us, sizeof(poll_us));
 	PE_parse_boot_argn("touchlog", &log, sizeof(log));
@@ -572,8 +584,27 @@ nvt_thread(__unused void *parameter, __unused wait_result_t result)
 			}
 
 			if (is_esd || is_all_ff || (current_irq && is_all_zero)) {
+				/* Avoid repeatedly probing or resetting a healthy controller when
+				 * polling an idle panel returns all 0xff. Check it again about
+				 * once per second so a later failure is still detected. */
+				if (is_all_ff && !current_irq && !any_down && idle_ff_grace > 0) {
+					idle_ff_grace--;
+					bad_reads = 0;
+					delay(poll_us);
+					continue;
+				}
 				bad_reads++;
 				if (bad_reads >= 4) {
+					if (is_all_ff && !current_irq && !any_down && nvt_firmware_responds(event_buf_addr)) {
+						idle_ff_grace = 1000000u / (2u * poll_us);
+						if (idle_ff_grace == 0) {
+							idle_ff_grace = 1;
+						}
+						bad_reads = 0;
+						delay(poll_us);
+						continue;
+					}
+					idle_ff_grace = 0;
 					if (log || bad_reads == 4) {
 						printf("nvt: watchdog: lost touch response (%s, irq=%u), recovering...\n",
 						    is_esd ? "ESD" : (is_all_ff ? "all 0xFF" : "all 0x00"), current_irq);
@@ -594,6 +625,7 @@ nvt_thread(__unused void *parameter, __unused wait_result_t result)
 				}
 			} else {
 				bad_reads = 0;
+				idle_ff_grace = 0;
 			}
 
 			/* Periodically refresh page pointer to guarantee it never drifts */
