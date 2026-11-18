@@ -310,6 +310,20 @@ if b'XNUP' in d:
 }
 
 # Build steps
+xnu_dependencies_ready() {
+	local sdk="$ROOT/xnu-deps/sdk/iPhoneOS16.5.xnu.sdk"
+	local host="$ROOT/xnu-deps/host/bin" tool
+	[ -f "$sdk/SDKSettings.plist" ] || return 1
+	[ -x "$sdk/usr/local/libexec/availability.pl" ] || return 1
+	[ -f "$sdk/usr/local/include/kernel/os/firehose_buffer_private.h" ] || return 1
+	[ -f "$sdk/usr/local/include/kernel/os/firehose_types.defs" ] || return 1
+	[ -f "$sdk/usr/local/lib/kernel/libfirehose_kernel.a" ] || return 1
+	[ -f "$sdk/usr/local/lib/kernel/libpthread_kext.a" ] || return 1
+	for tool in mig migcom unifdef tcsh csh ld64; do
+		[ -x "$host/$tool" ] || return 1
+	done
+}
+
 step_fetch_ios() {
 	if [ -d "$ROOT/ios165/rootfs/usr/sbin" ] && [ -f "$ROOT/ios165/rootfs/sbin/launchd" ] &&
 	   [ -f "$ROOT/ios165/.done-rootfs" ] && [ ! "$ROOT/ios165/select-system.py" -nt "$ROOT/ios165/.done-rootfs" ]; then
@@ -334,8 +348,13 @@ step_build_xnu() {
 		info "Syncing xnu/files/ into existing xnu-src/xnu-8796.121.2/"
 		cp -a "$ROOT/xnu/files/." "$ROOT/xnu-src/xnu-8796.121.2/"
 	fi
-	if [ ! -f "$ROOT/xnu-deps/sdk/iPhoneOS16.5.xnu.sdk/SDKSettings.plist" ] || [ ! -d "$ROOT/xnu-deps/host/bin" ]; then
+	if ! xnu_dependencies_ready; then
+		info "XNU dependencies are missing or incomplete; setting them up."
 		run_step "Setting up XNU dependencies (xnu-deps/setup.sh)" "$LOG_DIR/xnu-deps.log" bash "$ROOT/xnu-deps/setup.sh" || return 1
+		if ! xnu_dependencies_ready; then
+			fail "XNU dependency setup did not produce all required SDK files and tools. See $LOG_DIR/xnu-deps.log."
+			return 1
+		fi
 	else
 		ok "xnu-deps already set up (skipping)"
 	fi
