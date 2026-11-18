@@ -326,7 +326,12 @@ xnu_dependencies_ready() {
 
 step_fetch_ios() {
 	if [ -d "$ROOT/ios165/rootfs/usr/sbin" ] && [ -f "$ROOT/ios165/rootfs/sbin/launchd" ] &&
-	   [ -f "$ROOT/ios165/.done-rootfs" ] && [ ! "$ROOT/ios165/select-system.py" -nt "$ROOT/ios165/.done-rootfs" ]; then
+	   [ -f "$ROOT/ios165/.done-rootfs" ] && [ ! "$ROOT/ios165/select-system.py" -nt "$ROOT/ios165/.done-rootfs" ] &&
+	   [ -f "$ROOT/ios165/system.manifest" ] && [ -f "$ROOT/ios165/var.skel" ] &&
+	   [ -f "$ROOT/ios165/.done-cryptex" ] && [ -d "$ROOT/ios165/cryptex/usr/lib" ] &&
+	   [ -f "$ROOT/ios165/20F66__iPhone10,3_6/dyld_shared_cache_arm64" ] &&
+	   [ "$(find "$ROOT/ios165/20F66__iPhone10,3_6" -maxdepth 1 -type f 2>/dev/null | wc -l)" -eq 43 ] &&
+	   [ -f "$ROOT/ios165/.done-cryptex-app" ] && [ -f "$ROOT/ios165/cryptex-app/usr/libexec/webbookmarksd" ]; then
 		ok "iOS 16.5 (20F66) already extracted in ios165/rootfs (skipping)"
 		return 0
 	fi

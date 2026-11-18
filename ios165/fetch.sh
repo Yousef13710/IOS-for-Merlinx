@@ -50,7 +50,8 @@ unzbm_all() { # unzbm_all DIR: expand every LZBITMAP file below DIR
 }
 
 # --- the root filesystem --------------------------------------------------------------------------
-if [ ! -f .done-rootfs ] || [ select-system.py -nt .done-rootfs ]; then
+if [ ! -f .done-rootfs ] || [ select-system.py -nt .done-rootfs ] ||
+   [ ! -f rootfs/sbin/launchd ] || [ ! -f system.manifest ] || [ ! -f var.skel ]; then
 	if [ ! -f rootfs.dmg ]; then
 		echo "fetch.sh: downloading the root filesystem image (4.7 GB)"
 		python3 fetch-from-ipsw.py $ROOTFS_DMG rootfs.dmg.part
@@ -75,7 +76,8 @@ if [ ! -f .done-rootfs ] || [ select-system.py -nt .done-rootfs ]; then
 fi
 
 # --- the OS cryptex -------------------------------------------------------------------------------
-if [ ! -f .done-cryptex ]; then
+if [ ! -f .done-cryptex ] || [ ! -d cryptex/usr/lib ] || [ ! -f "$CACHE/dyld_shared_cache_arm64" ] ||
+   [ "$(find "$CACHE" -maxdepth 1 -type f 2>/dev/null | wc -l)" -ne 43 ]; then
 	if [ ! -f cryptex-os.dmg ]; then
 		echo "fetch.sh: downloading the OS cryptex image (2.7 GB)"
 		python3 fetch-from-ipsw.py $CRYPTEX_DMG cryptex-os.dmg.part
@@ -100,7 +102,7 @@ fi
 # --- the App cryptex ------------------------------------------------------------------------------
 # kept as it is (the boot off the flash puts it in memory unchanged, ../userland/build.sh FLASHBOOT=1)
 # and unpacked (the system image has its files at /System/Cryptexes/App)
-if [ ! -f .done-cryptex-app ]; then
+if [ ! -f .done-cryptex-app ] || [ ! -f cryptex-app/usr/libexec/webbookmarksd ]; then
 	if [ ! -f cryptex-app.dmg ]; then
 		echo "fetch.sh: downloading the App cryptex image (10 MB)"
 		python3 fetch-from-ipsw.py $APP_CRYPTEX_DMG cryptex-app.dmg.part

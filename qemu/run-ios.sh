@@ -33,6 +33,12 @@ IMG=${IMG:-userland/system.apfs}
 ROOT=${ROOT:-userland/root.apfs}
 [ -f "$IMG" ] && [ -f "$ROOT" ] || { echo "run-ios.sh: $IMG or $ROOT is missing (userland/build.sh makes them)"; exit 1; }
 SECS=${1:-60}; shift
+# The installer builds its userland with the keybag service enabled. Supply its
+# simulated keys in QEMU too, unless the caller explicitly selected a value.
+case " ${CMDLINE:-} " in
+  *" aks_keys="*) ;;
+  *) CMDLINE="aks_keys=1 ${CMDLINE:-}" ;;
+esac
 RAM_BASE=0x40000000 RD_ADDR=0xFC000000
 RAM_GB=${QEMU_RAM_GB:-7}
 RAM_SIZE=$((RAM_GB << 30)) FILE_SIZE=$((12 << 30))

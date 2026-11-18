@@ -18,7 +18,7 @@ case "${1:-}" in
 esac
 EOF
 chmod +x "$tmp/adb"
-touch "$tmp/boot.img"
+printf 'test image' > "$tmp/boot.img"
 export PATH="$tmp:$PATH"
 
 # Option 5 runs the real interactive connection check; q then exits the menu.
@@ -33,4 +33,19 @@ if TEST_ADB_STATE=offline bash "$root/tools/install-merlinx.sh" --serial testser
   exit 1
 fi
 grep -q "got state: 'offline'" "$tmp/offline.log"
+
+# Missing or empty images must fail before even contacting a device, regardless
+# of whether repartitioning or formatting was requested.
+for image in "$tmp/missing.img" "$tmp/empty.img"; do
+  : > "$tmp/empty.img"
+  if bash "$root/tools/install-merlinx.sh" --serial testserial --repartition --format-iosdata --boot "$image" --dry-run > "$tmp/invalid.log" 2>&1; then
+    echo "invalid image was accepted: $image" >&2
+    exit 1
+  fi
+  grep -q 'Nothing was changed' "$tmp/invalid.log"
+  if grep -q 'Checking Recovery' "$tmp/invalid.log"; then
+    echo 'invalid image was not rejected before device access' >&2
+    exit 1
+  fi
+done
 echo 'ADB recovery checks passed (CRLF recovery and offline)'

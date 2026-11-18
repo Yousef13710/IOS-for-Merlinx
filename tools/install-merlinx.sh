@@ -60,6 +60,23 @@ if [ -z "$BOOT_IMG" ] && [ -z "$XNUSYS_IMG" ] && [ "$DO_REPART" -eq 0 ] && [ "$D
 	exit 1
 fi
 
+# Validate all input images before changing the partition table or formatting anything.
+for image in "$BOOT_IMG" "$XNUSYS_IMG"; do
+	[ -z "$image" ] && continue
+	if [ ! -f "$image" ] || [ ! -s "$image" ] || [ ! -r "$image" ]; then
+		echo "Error: image is missing, empty, or unreadable: $image. Nothing was changed." >&2
+		exit 1
+	fi
+done
+if [ -n "$BOOT_IMG" ] && [ "$(wc -c < "$BOOT_IMG")" -gt $((64 * 1024 * 1024)) ]; then
+	echo "Error: boot image exceeds the 64 MiB boot partition. Nothing was changed." >&2
+	exit 1
+fi
+if [ "$DO_REPART" -eq 1 ] && [ -n "$XNUSYS_IMG" ] && [ "$(wc -c < "$XNUSYS_IMG")" -gt $((8390592 * 512)) ]; then
+	echo "Error: system image exceeds the new xnusys partition. Nothing was changed." >&2
+	exit 1
+fi
+
 ADB=(adb)
 if [ -n "$ADB_SERIAL" ]; then
 	ADB=(adb -s "$ADB_SERIAL")
@@ -140,6 +157,8 @@ expected = {"super", "cache", "userdata", "iosdata", "xnusys"}
 for n in (43, 44, 45):
     if n in parts and parts[n][2] not in expected:
         fail("p%d is '%s', not Android's super/cache/userdata. Refusing to touch it. Nothing was changed." % (n, parts[n][2]))
+if 48 in parts and parts[48][2] != "xnusys":
+    fail("p48 is '%s', not xnusys. Refusing to touch it. Nothing was changed." % parts[48][2])
 
 present = [n for n in sorted(OURS) if n in parts]
 if 43 not in parts and not present:
@@ -147,6 +166,9 @@ if 43 not in parts and not present:
 region_start = parts[43][0] if 43 in parts else min(parts[n][0] for n in present)
 # the space those partitions occupy now is ours to reuse, up to the next foreign partition
 region_end = max(parts[n][1] for n in present)
+for n, (first, last, name) in parts.items():
+    if n not in OURS and first <= region_end and last >= region_start:
+        fail("p%d (%s) overlaps the install region. Nothing was changed." % (n, name))
 tail = [f for n, (f, l, nm) in parts.items() if n not in OURS and f > region_start]
 if 45 not in parts:
     # a half-done earlier run (userdata already gone): take the free space up to the next foreign partition,
