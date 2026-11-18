@@ -1760,8 +1760,11 @@ static void rescue_log(void)
 	out(" wrapped ");
 	out_dec(wrapped);
 	out("\n");
-	if (ring_at > ring_sz) {
-		ring_at = 0;
+	/* Recovery or a new boot image can overwrite the old kernel's DRAM while
+	 * leaving MARK_RUNNING behind. Never follow pointers from that stale state. */
+	if (len > head_sz + ring_sz || ring_at >= ring_sz || wrapped > 1) {
+		out("saved XNU log metadata is invalid; skipping stale watchdog recovery\n");
+		return;
 	}
 	if (!wrapped) {
 		if (len > head_sz + ring_sz) {
