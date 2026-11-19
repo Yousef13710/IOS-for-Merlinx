@@ -7,6 +7,8 @@ Reproducible record of kernel, loader, and userland fixes applied on top of `hak
 - Historical milestone: the step 5f backup mentioned in earlier notes has been removed.
 
 ## 2. Display & GPU Optimizations
+
+- **Backlight limitation:** removing all framebuffer layers makes the picture black but does not switch off the panel's backlight. On the tested Tianma NT36672A panel, Android's [`nt36672A_fhdp_dsi_vdo_tianma` driver](https://github.com/LineageOS/android_kernel_xiaomi_mt6768/blob/lineage-20/drivers/misc/mediatek/lcm/nt36672A_fhdp_dsi_vdo_tianma/nt36672A_fhdp_dsi_vdo_tianma.c) sets brightness with DSI command `0x51`. The stock boot device tree also describes an MT6370 backlight controller; the active path and panel variants need device validation before writing hardware registers. Neither layer clearing nor the iOS system-sleep assertion controls that hardware today.
 - **Verbose console off (`-DXNU_VERBOSE=0`):** Disables `-v` text console over the UI (`v_display = 1` in `mtkloader.c`) while preserving `debug=0x8` and pstore `console-ramoops`.
 - **Fast framebuffer copy (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4`):**
   - Dropped `MiniIOMobileFramebuffer` driver copy time from `~8.5 ms` to `~3.2 ms` per frame.

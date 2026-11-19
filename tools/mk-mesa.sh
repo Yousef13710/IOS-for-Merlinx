@@ -82,6 +82,8 @@ endian = 'little'
 needs_exe_wrapper = true
 INI
 DRIVERS=${DRIVERS:-softpipe,freedreno}
+# An interrupted build must never leave the old configuration marked usable.
+rm -f out/built-drivers
 BUILD=build-${DRIVERS//,/-}
 # panfrost travels in the image that goes into the Infinix's 32 MB boot partition: built for size
 # (11 MB instead of 14.5), which costs the GPU nothing -- it is the GPU that draws
@@ -112,5 +114,6 @@ nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/e
 cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml out/gl.xml
 # (userland/build.sh comes here again when this no longer matches)
 cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/redwood-drm/* | sha256sum > out/built-from
+printf '%s\n' "$DRIVERS" > out/built-drivers
 echo "mk-mesa.sh: Mesa $VERSION ($DRIVERS): $B/out/libOSMesa.8.dylib, $(wc -c < out/libOSMesa.8.dylib | tr -d " ") bytes," \
 	"$(wc -l < out/exported-gl.txt) gl* functions"

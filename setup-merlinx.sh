@@ -367,7 +367,11 @@ step_build_xnu() {
 }
 
 step_build_mesa() {
-	if [ -f "$ROOT/xnu-deps/build/mesa/out/libOSMesa.8.dylib" ]; then
+	local mesa="$ROOT/xnu-deps/build/mesa/out" patch_hash
+	patch_hash=$(cat "$ROOT"/tools/mesa/*.patch "$ROOT"/tools/mesa/redwood-drm/* | sha256sum)
+	if [ -s "$mesa/libOSMesa.8.dylib" ] && [ -s "$mesa/gl.xml" ] && [ -s "$mesa/exported-gl.txt" ] &&
+	   [ "$(cat "$mesa/built-drivers" 2>/dev/null)" = "softpipe,panfrost" ] &&
+	   [ "$(cat "$mesa/built-from" 2>/dev/null)" = "$patch_hash" ]; then
 		ok "Mesa Panfrost (libOSMesa.8.dylib) already built (skipping)"
 		return 0
 	fi
@@ -376,7 +380,20 @@ step_build_mesa() {
 
 step_build_userland() {
 	run_step "Building userland (root.apfs + system.apfs)" "$LOG_DIR/userland-build.log" \
-		bash -c 'cd "$1/userland" && DRIVERS="softpipe,panfrost" GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd com.apple.medialibraryd com.apple.FileProvider com.apple.searchd com.apple.assetsd com.apple.mobile.lockdown com.apple.timed" OSLOG="" bash build.sh' _ "$ROOT"
+		bash -c 'cd "$1/userland" && DRIVERS="softpipe,panfrost" GL=1 WIFID=1 RC=rc.launchd.aks MORE_JOBS="com.apple.bluetoothd com.apple.BlueTool com.apple.tccd com.apple.mobile.keybagd com.apple.nanoregistryd com.apple.nanoprefsyncd com.apple.mediaserverd com.apple.medialibraryd com.apple.FileProvider com.apple.searchd com.apple.assetsd com.apple.mobile.lockdown com.apple.timed" OSLOG="" bash build.sh' _ "$ROOT" || return 1
+	local file
+	for file in lib/libOSMesa.8.dylib lib/libredwood-gl.dylib \
+		fw/connsys/WIFI_RAM_CODE_soc1_0_1a_1.bin fw/connsys/soc1_0_patch_mcu_1a_1_hdr.bin \
+		fw/connsys/soc1_0_ram_bt_1a_1_hdr.bin fw/connsys/soc1_0_ram_mcu_1a_1_hdr.bin \
+		fw/connsys/soc1_0_ram_wifi_1a_1_hdr.bin fw/connsys/BT_FW.cfg fw/connsys/WMT_SOC.cfg \
+		fw/connsys/wifi.cfg fw/connsys/txpowerctrl.cfg; do
+		if [ ! -s "$ROOT/userland/root/$file" ] ||
+		   ! cmp -s "$ROOT/userland/root/$file" <(python3 "$ROOT/tools/apfs/apfs.py" cat "$ROOT/userland/root.apfs" "/$file"); then
+			fail "Required GPU or radio file is missing or differs in root.apfs: $file"
+			return 1
+		fi
+	done
+	ok "GPU libraries and radio firmware verified in boot image"
 }
 
 step_pack_boot() {

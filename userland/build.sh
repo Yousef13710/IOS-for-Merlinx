@@ -289,7 +289,9 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			# the OpenGL ES library, and the table of functions that hands CoreAnimation's calls to it
 			# (Mesa says beside the library what it was built from: one from other patches is built again)
 			M=../xnu-deps/build/mesa/out
-			[ "$(cat $M/built-from 2>/dev/null)" = "$(cat ../tools/mesa/*.patch ../tools/mesa/redwood-drm/* | sha256)" ] ||
+			[ -s "$M/libOSMesa.8.dylib" ] && [ -s "$M/gl.xml" ] && [ -s "$M/exported-gl.txt" ] &&
+			[ "$(cat "$M/built-drivers" 2>/dev/null)" = "${DRIVERS:-softpipe,freedreno}" ] &&
+			[ "$(cat "$M/built-from" 2>/dev/null)" = "$(cat ../tools/mesa/*.patch ../tools/mesa/redwood-drm/* | sha256)" ] ||
 				../tools/mk-mesa.sh
 			./mkeagl.py src/eagl_slots.txt $M/gl.xml $M/exported-gl.txt src/eagl.c > obj/eagl_gen.h
 			$DYN -dynamiclib -install_name /redwood/lib/libredwood-gl.dylib -Iobj -framework CoreFoundation \
