@@ -940,6 +940,7 @@ keep_line(const char *format, ...)
 }
 
 #define REDWOOD_USER_WALLPAPER "/var/mobile/Library/Redwood/wallpaper.jpg"
+#define REDWOOD_FALLBACK_WALLPAPER "/redwood/share/wallpaper-fallback.png"
 
 static id wallpaper_layers[8];
 static int n_wallpaper_layers;
@@ -947,14 +948,14 @@ static int n_wallpaper_layers;
 static id
 load_wallpaper_image(void)
 {
-	const char *p = access(REDWOOD_USER_WALLPAPER, R_OK) == 0 ? REDWOOD_USER_WALLPAPER : REDWOOD_WALLPAPER;
-	id path = (id)CFStringCreateWithCString(NULL, p, kCFStringEncodingUTF8);
-	id img = path ? SEND1(id, objc_getClass("UIImage"), "imageWithContentsOfFile:", id, path) : NULL;
-
-	if (path != NULL) {
-		CFRelease(path);
+	const char *paths[] = { REDWOOD_USER_WALLPAPER, REDWOOD_WALLPAPER, REDWOOD_FALLBACK_WALLPAPER };
+	for (unsigned i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+		id path = (id)CFStringCreateWithCString(NULL, paths[i], kCFStringEncodingUTF8);
+		id img = path ? SEND1(id, objc_getClass("UIImage"), "imageWithContentsOfFile:", id, path) : NULL;
+		if (path != NULL) CFRelease(path);
+		if (img != NULL) return img;
 	}
-	return img;
+	return NULL;
 }
 
 static void
@@ -1806,7 +1807,8 @@ redwood_springboard_init(void)
 		}
 		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0 || (arg = strstr(args, "sb_wallpaper=0")) == NULL ||
 		    (arg != args && arg[-1] != ' ')) {
-			if (access(REDWOOD_WALLPAPER, R_OK) == 0) {
+			if (access(REDWOOD_USER_WALLPAPER, R_OK) == 0 || access(REDWOOD_WALLPAPER, R_OK) == 0 ||
+			    access(REDWOOD_FALLBACK_WALLPAPER, R_OK) == 0) {
 				dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
 					put_wallpaper(0);
 				});

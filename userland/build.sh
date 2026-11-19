@@ -461,6 +461,13 @@ finally:
     shutil.rmtree(tmp, ignore_errors=True)
 PYEOF
 	fi
+	# A fresh Linux host may lack the optional HEIF/Pillow/numpy tools. Always
+	# ship an original fallback so that a missing generated JPEG is visible.
+	mkdir -p root/share
+	python3 ../tools/make-fallback-wallpaper.py root/share/wallpaper-fallback.png
+	if [ ! -s root/share/wallpaper.jpg ]; then
+		echo "build.sh: using fallback wallpaper; install heif-convert, Pillow and numpy for the wallpaper collection"
+	fi
 	[ -f obj/libredwood-media.dylib ] && cp obj/libredwood-media.dylib root/lib/     # (as with cpu_test)
 	[ -f obj/libredwood-app.dylib ] && cp obj/libredwood-app.dylib root/lib/
 	[ -f obj/libredwood.lockdown.dylib ] && cp obj/libredwood.lockdown.dylib root/lib/
@@ -627,16 +634,13 @@ for f in WIFI_RAM_CODE_soc1_0_1a_1.bin soc1_0_patch_mcu_1a_1_hdr.bin soc1_0_ram_
 done
 mkdir -p root/fw/connsys
 install -m 0644 ../firmware/connsys/* root/fw/connsys/
-# Firmware that is not there is otherwise silent at build time and speaks only much later, deep in a
-# device log -- "adreno: THE GPU IS NOT STARTED: the small image has no fw/a660_gmu.bin" cost a phone
-# slot on 19 October 2026. It is the vendor's and never in the repository, so a copy made with bare
-# git worktree add has none of it, and neither has one whose tools/new-workspace.sh predates the fw-*
-# loop there. Say what went in and what was not there to go in; what each one is for is above.
+# These optional legacy firmware directories belong to other hardware; their
+# absence is expected on Merlinx. CONNSYS firmware is validated above.
 fwhave= fwnone=
 for d in gpu wifi haptic camera audio; do
 	if [ -d ../fw-$d ]; then fwhave="$fwhave $d"; else fwnone="$fwnone $d"; fi
 done
-echo "build.sh: fw/: $(ls -1 root/fw 2>/dev/null | wc -l) files from ../fw-*:${fwhave:- none present}${fwnone:+, absent:$fwnone}"
+echo "build.sh: Merlinx CONNSYS firmware included; optional legacy firmware directories:${fwhave:- none present}${fwnone:+; not present:$fwnone}"
 # an image carrying fw/network carries the name and passphrase of your network, and the images are
 # what somebody would be handed to run this on a second phone
 if [ -f root/fw/network ]; then

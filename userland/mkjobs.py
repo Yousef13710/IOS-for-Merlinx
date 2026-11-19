@@ -93,6 +93,9 @@ for label in labels:
     job.pop('_LimitLoadToDeviceTree', None)
     if 'all' in oslog or label in oslog:
         job.setdefault('EnvironmentVariables', {})['OS_ACTIVITY_DT_MODE'] = 'YES'
+    # Opt in when investigating failed CoreGraphics context creation.
+    if label == 'com.apple.SpringBoard' and os.environ.get('CG_CONTEXT_DIAG') == '1':
+        job.setdefault('EnvironmentVariables', {})['CG_CONTEXT_SHOW_BACKTRACE'] = '1'
     with open(f'{dest}/{label}.plist', 'wb') as f:
         plistlib.dump(job, f, fmt=plistlib.FMT_BINARY)
     program = job.get('Program') or job['ProgramArguments'][0]
