@@ -17,21 +17,9 @@ The ASCII TUI installer checks your host tools and recovery connection, guides y
 
 ## 1. Current Status (`merlinx`)
 
-- **Works:**
-  - 8-core SMP (`XNU_CORES=8`, A75 @ 2000 MHz, A55 @ 1800 MHz via `mtk_cpufreq=3`), Mali-G52 @ 1050 MHz (`GL=1` / Mesa Panfrost, `mali_mhz=1050`, wired `JOB_IRQ`), smooth UI (`cpu1` `backboardd` GL / `cpu2` `mali_worker` + app GL), tear-free double-buffered display (`fbscale=2 fbfit=1 fb_filter=0 fb_threads=4 fb_flip=1`).
-  - Wallpapers: 20 crisp `750x1624` wallpapers (`WWDC 2022` + 19 Apple-style gradients/arcs) with live **Settings → Wallpaper** picker (`inject.c` + `inject_sb.c`, persisted to `/var/mobile/Library/Redwood/wallpaper.jpg`).
-  - USB (`redwood_musb.c`, `mtk_usb=1`, `05ac:12a8` HS 480 Mbps) + `usbmux_relay` + `lockdownd` pairing + `com.apple.mobile.screenshotr` (`idevice_id`, `idevicepair`, `ideviceinfo`, `idevicedate`, `idevicescreenshot`, `idevicediagnostics restart` via `TOPRGU_SWRST`).
-  - Touchscreen (`redwood_nvt.c`), power & volume buttons (`buttons=2`), battery gauge (`mtkbatt=1`).
-  - Bluetooth (`connsys_bt=2`, `bluetoothd`, `BlueTool` — Settings → Bluetooth works and stays on).
-  - Wi-Fi & NTP time sync (`connsys_step=17`, `WIFID=1`, `com.apple.timed`): scans, joins, and authenticates on Open & WPA2 networks (2.4 GHz & 5 GHz), DHCP, DNS, TCP/UDP, NTP.
-  - Rear camera (`s5kgm1sp`, `mtkcam_skel=1`, live preview in `Camera.app`, currently laggy/tearing).
-  - Persistent `/private/var` on **`ext2`** (`/dev/emmc1` → `iosdata`, auto-sized: ~51.9 GiB on 64 GB / ~110 GiB on 128 GB; `ext2` is used instead of `ext4` via XNU's custom `ext2` VFS driver) with 32 MB write-back cache, `CMD23`/`CMD25` multi-block eMMC writes, 2 s background dirty-block sync, per-inode `fsync`, and 32 KB read-ahead (**~2 min boot**; un-chopped icons, widgets).
-  - Optional RAM-only `/private/var` mode (`no_ext2=1` boot-arg, non-persistent).
-- **Known Limitations:**
-  - **Live dynamic `PosterBoard` wallpapers** are not enabled (uses fast static `750x1624` wallpapers + **Settings → Wallpaper** picker).
-  - **Safari / WebKit:** Stays blank/unresponsive despite working Wi-Fi/DNS/TCP.
-  - **`Settings → General → About`:** Currently crashes `Preferences`.
-  - **Not ported / unsupported:** Front camera, speakers/mic audio, cellular/baseband, `ext4` (use `ext2` for `iosdata`), and Apple online services (iCloud/App Store/activation).
+See the [feature support and known limitations](../README.md#hardware--feature-support) in the main README for the current, tested status. In particular, the battery may discharge while connected to USB, the physical backlight may remain on when the screen is locked, storage reporting and Files locations are incomplete, and the clock may start at the Unix epoch.
+
+The installer includes the repository's CONNSYS radio firmware and builds Mesa with Panfrost. It checks that the radio files and GPU libraries are present in the boot filesystem before flashing. Some devices have shown a black home screen; graphics and wallpaper behavior are still being investigated.
 
 ---
 
@@ -43,25 +31,26 @@ The ASCII TUI installer checks your host tools and recovery connection, guides y
 - **TWRP recovery** flashed to `recovery` (`mmcblk0p1`)
 
 ### Host (Linux x86_64)
-- `adb`, `fastboot`, `python3` (with `venv`, `Pillow`, and `numpy`), `heif-convert` (`libheif-examples`, for rendering the `750x1624` `WWDC 2022` wallpaper), `git`, `curl`, `tar`, `xz`, `make`, `cc`, `clang`, `lld` (or run `./tools/get-zig.sh`), `flex`, `bison`, `m4`, `perl`, `autoconf`, `automake`, `meson`, `ninja`, `llvm-ar`, `7zz`/`7z`
+- `adb`, `fastboot`, `python3` (with `venv`), `git`, `curl`, `tar`, `xz`, `make`, `cc`, `clang`, `lld` (or run `./tools/get-zig.sh`), `flex`, `bison`, `m4`, `perl`, `autoconf`, `automake`, `meson`, `ninja`, `llvm-ar`, `7zz`/`7z`
+- Optional for the full wallpaper collection: `heif-convert`, Pillow, and NumPy. A fallback wallpaper is included without them.
 - **Theos** (`$THEOS`, default `~/theos`) with its Linux toolchain (`toolchain/linux/iphone`) and `sdks/iPhoneOS16.5.sdk`
 - `ldid` in the standard Theos Linux toolchain or on `PATH` (or `LDID` set to a compatible signer), required to sign the keybag helper. A signing failure stops the installer before an image is flashed.
 - Optional for USB tools on host: `usbmuxd` and `libimobiledevice` (`idevice_id`, `idevicepair`, `ideviceinfo`, `idevicediagnostics`)
-- An iOS 16.5 IPSW (downloaded automatically via `./ios165/fetch.sh`) to generate `userland/root.apfs` and `userland/system.apfs` (`xnusys`) — no Apple binaries are included in this repo
+- iOS 16.5 components (downloaded automatically from Apple via `./ios165/fetch.sh`) to generate `userland/root.apfs` and `userland/system.apfs` (`xnusys`) — no Apple binaries are included in this repo
 - `prebuilt/loader.efi` (included in this repo) and a stock `merlinx` `boot.img` (used as the Android boot container for `tools/chainboot.py` — pull it from your phone in TWRP before flashing: `adb shell dd if=/dev/block/by-name/boot of=/tmp/stock_boot.img && adb pull /tmp/stock_boot.img`)
 
 ---
 
 ## 3. Partition Layout (`mmcblk0`)
 
-`tools/install-merlinx.sh --repartition` auto-detects the eMMC size from `sgdisk -p` and replaces Android `super`, `cache`, and `userdata` with `iosdata` + `xnusys` (example below is the 64 GB layout; on 128 GB, `iosdata` expands to ~110 GiB and `xnusys` sits at the end of the disk):
+`tools/install-merlinx.sh --repartition` reads the GPT and detects the eMMC size and replaces Android `super`, `cache`, and `userdata` with `iosdata` + `xnusys` (example below is the 64 GB layout; on 128 GB, `iosdata` expands to ~110 GiB and `xnusys` sits at the end of the disk):
 
 | Partition | Name | Sectors (512B, 64 GB) | Size | Purpose |
 |---|---|---|---|---|
 | `p1` | `recovery` | stock | stock | TWRP (keep!) |
 | `p33` | `boot` | stock | 64 MiB | HakiOS `boot.img` (`mtkloader` + `payload.bin`) |
 | `p43` | `iosdata` | `4767744 .. 113631295` | ~51.9 GiB (64 GB) / ~110 GiB (128 GB) | `ext2` (`-b 4096 -L iosdata`), mounted at `/private/var` |
-| `p48` | `xnusys` | `113631296 .. 122021887` | 4.0 GiB | iOS 16.5 `packfs` rootfs (`/dev/emmc0`, read-only) |
+| `p48` | `xnusys` | `113631296 .. 122021887` | 4.0 GiB | iOS 16.5 APFS rootfs (`/dev/emmc0`, read-only) |
 
 All bootloader, TEE, modem/NV, and firmware partitions (`preloader`, `lk`, `tee`, `nvram`, `persist`, etc.) are untouched.
 

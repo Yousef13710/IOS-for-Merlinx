@@ -1,8 +1,8 @@
 # iOS 16.5 for Xiaomi Redmi Note 9 (`merlinx`)
 
-**Real Apple Darwin/XNU (`xnu-8796.121.2`) + unmodified iOS 16.5 userland running natively on the Xiaomi Redmi Note 9 (`merlinx`, MediaTek Helio G85 MT6768).**
+**Apple Darwin/XNU (`xnu-8796.121.2`) + iOS 16.5 userland with compatibility shims running natively on the Xiaomi Redmi Note 9 (`merlinx`, MediaTek Helio G85 MT6768).**
 
-Based on [HakiOS](https://github.com/oosexgang/hakios-xnu-kernel), this port runs full iOS 16.5 (`launchd` → `backboardd` → `SpringBoard` → apps) with GPU acceleration, Wi-Fi, Bluetooth, persistent `ext2` storage, USB `usbmuxd`/`libimobiledevice` support, and automatic detection for both **3 GB / 4 GB RAM** and **64 GB / 128 GB eMMC** variants.
+Based on [HakiOS](https://github.com/oosexgang/hakios-xnu-kernel), this port runs full iOS 16.5 (`launchd` → `backboardd` → `SpringBoard` → apps) with experimental Mali graphics, Wi-Fi, Bluetooth, persistent `ext2` storage, and USB `usbmuxd`/`libimobiledevice` support. The installer detects **3 GB / 4 GB RAM** and **64 GB / 128 GB eMMC** layouts; features and stability can vary between devices.
 
 > [Install Guide](docs/merlinx-install.md) · [Bring-up Notes](docs/merlinx-bringup-notes.md) · [TWRP Installer](tools/install-merlinx.sh) · [Upstream Docs](docs/README.md)
 
@@ -20,21 +20,30 @@ Captured directly from a Redmi Note 9 (`merlinx`) over USB using `idevicescreens
 
 ## Hardware & Feature Support
 
+This is an experimental port. The following describes what has been observed on a Merlinx, not a guarantee for every hardware variant.
+
 | Subsystem | Status | Details |
 |---|---|---|
-| **CPU & Boot** | Working | `mtkloader` on MT6768, all **8 cores** (`A75 @ 2000 MHz`, `A55 @ 1800 MHz`), auto-detected **3 GB / 4 GB RAM**, warm reboot via `TOPRGU_SWRST` |
-| **Graphics & UI** | Working | In-kernel **Mali-G52** (`1050 MHz` OC, wired `JOB_IRQ`) + Mesa **Panfrost** (`-O3` + persistent shader cache), tear-free double-buffered page flipping |
-| **Storage** | Working | Read-only `system.apfs` (`xnusys`, 4.0 GiB) + persistent read-write `/private/var` on **`ext2`** (`iosdata`, auto-sized ~51.9 GiB / ~110 GiB), **~2 min boot** (`no_ext2=1` for RAM-only) |
-| **Touch & Buttons** | Working | Novatek touchscreen (`redwood_nvt.c`), power & volume keys (`redwood_mtkkeys.c`) |
-| **Wi-Fi & Time** | Working | CONNSYS (`2.4 GHz` & `5 GHz`, Open & WPA2), DHCP on `en0`, DNS/TCP/UDP, NTP via `com.apple.timed` |
-| **Bluetooth** | Working | `connsys_bt=2` + `bluetoothd` + `BlueTool` + `securityd`/`keybagd` |
-| **USB (`libimobiledevice`)** | Working | MUSB HS `480 Mbps` (`05ac:12a8`), `usbmux_relay`, `lockdownd` pairing, `ideviceinfo`, `idevicescreenshot`, `idevicediagnostics restart` |
-| **Wallpapers** | Working | 20 `750x1624` wallpapers (`WWDC 2022` + Apple-style gradients) with live **Settings → Wallpaper** picker |
-| **Rear Camera & Battery** | Partial / Working | Rear `s5kgm1sp` live preview in `Camera.app` (currently laggy/tearing); real battery percentage in status bar |
+| **Boot & CPU** | Working | iOS boots on the tested device with eight CPU cores. The loader detects supported RAM and storage sizes. |
+| **Graphics & UI** | Partial | Mali-G52 acceleration and the home screen work on the tested device. A tester reported a black home screen and CoreGraphics errors; that issue is under investigation. |
+| **Touch & buttons** | Working | Touch, power, and volume buttons work on the tested device. |
+| **Storage & Files** | Partial | The system uses a read-only system partition and a persistent `ext2` data partition. About opens, but free-space reporting is incorrect; Files opens, but Browse may have no locations. |
+| **Wi-Fi** | Working | Wi-Fi scanning and connection have been tested, including a WPA2 network. |
+| **Bluetooth** | Partial | Bluetooth can be enabled and its settings open. Pairing, profiles, and audio are not fully verified. |
+| **USB** | Partial | `usbmuxd`/`libimobiledevice` support provides device information, screenshots, logs, and restart on the tested setup. Some USB services remain unavailable. |
+| **Wallpaper** | Partial | A static wallpaper and picker are available. An original fallback is included if optional wallpaper-generation tools are missing. Live PosterBoard wallpapers are not supported. |
+| **Camera** | Partial | Rear-camera preview is available but can be slow or tear. Photo saving needs further testing. |
+| **Battery** | Partial | Battery readings are exposed, but the reported percentage can be inaccurate and the charger is not controlled by the current driver. |
 
 ### Known Limitations
-- **Not yet working:** Safari/WebKit rendering, accurate free-space reporting and the local location in Files → Browse, live `PosterBoard` wallpapers, and extra USB services (`afcd`, `os_trace_relay`, `mobile_installation_proxy`).
-- **Unsupported / not ported:** Front camera, speaker/mic audio, cellular/baseband, `ext4` (`iosdata` uses `ext2`), and Apple online services (activation, iCloud, App Store — no Secure Enclave).
+
+- **Charging:** The phone may discharge while connected to USB. The charger driver is not implemented; charge outside this build and do not rely on the displayed percentage alone.
+- **Screen off:** The screen content turns black, but the physical backlight may remain on.
+- **Clock:** The phone has no RTC driver yet, so its date may start at the Unix epoch. Network time may correct it once connectivity is available.
+- **Storage:** Free-space and iPhone Storage readings may be incorrect; Files → Browse may show no locations. Photo saving is not yet confirmed.
+- **Graphics:** Some devices have shown a black home screen and invalid CoreGraphics-context errors. Safari/WebKit rendering remains unreliable.
+- **Not yet supported:** Front camera, speaker and microphone audio, cellular/baseband, `ext4` for `iosdata`, Apple online services, and additional USB services such as `afcd`, `os_trace_relay`, and `mobile_installation_proxy`.
+- **QEMU:** Experimental; iOS services start, but an interactive home screen has not been verified on the current build.
 
 ---
 
@@ -45,7 +54,7 @@ Captured directly from a Redmi Note 9 (`merlinx`) over USB using `idevicescreens
 
 ### Requirements
 - **Phone:** Xiaomi Redmi Note 9 (`merlinx`, 3 GB / 4 GB RAM, 64 GB / 128 GB eMMC) with an **unlocked bootloader** and **custom recovery with root ADB** (TWRP, OrangeFox, PitchBlack, SHRP, etc.).
-- **PC:** Linux `x86_64` with **~18–20 GB free disk space** during build (~2 GB after optional post-install cleanup) and a USB cable.
+- **PC:** Linux `x86_64` with **~18–20 GB free disk space** during build (the installer can optionally remove extracted iOS files afterwards) and a USB cable.
 - **Signing:** `ldid` in the standard Theos Linux toolchain or on `PATH`. Alternatively, set `LDID` to a compatible signing executable. It signs the keybag helper required for boot.
 
 The installer shows download progress, completed flash chunks, and elapsed time for builds. Detailed command output is saved in `.setup-logs/`; the menu displays the combined session log path, and individual build and flash logs are kept there as well.
@@ -68,9 +77,9 @@ When an update changes files on the system image, choose **Update System and Boo
    ./setup-merlinx.sh
    ```
    - Choose **`1) Full Install`** and type **`YES`** when prompted.
-   - The script automatically checks/guides you on host tools (Theos + `iPhoneOS16.5.sdk`, `clang`, `python3`, etc.), downloads the official iOS 16.5 (20F66) IPSW, builds XNU + Mesa Panfrost + userland, packs `boot-ios.img`, auto-detects your 64 GB / 128 GB eMMC layout, formats `ext2`, and flashes everything.
+   - The script automatically checks/guides you on host tools (Theos + `iPhoneOS16.5.sdk`, `clang`, `python3`, etc.), downloads the required iOS 16.5 (20F66) components from Apple, builds XNU + Mesa Panfrost + userland, packs `boot-ios.img`, auto-detects your 64 GB / 128 GB eMMC layout, formats `ext2`, and flashes everything.
    - At the end, it asks if you want to **clean up ~8 GB** of temporary iOS/build files (`y`) or keep them (`N`) for faster future rebuilds.
-4. **Wait ~2 minutes on boot:** The phone reboots into `mtkloader` → XNU → iOS 16.5.
+4. **Allow several minutes for the first boot:** The phone reboots into `mtkloader` → XNU → iOS 16.5.
 
 For manual build/flash commands and troubleshooting, see **[docs/merlinx-install.md](docs/merlinx-install.md)**.
 
@@ -84,7 +93,7 @@ For manual build/flash commands and troubleshooting, see **[docs/merlinx-install
 - **[IOS-for-Merlinx](https://github.com/Yousef13710/IOS-for-Merlinx)** — Redmi Note 9 (`merlinx`) port (`mtk` branch)
 - **[hakios-xnu-kernel](https://github.com/oosexgang/hakios-xnu-kernel)** — Upstream HakiOS repository (`X6826B`)
 
-The repository includes CONNSYS radio firmware under `firmware/connsys`; these vendor files are separate from the project's own code. Apple binaries are not included (`./ios165/fetch.sh` downloads the official IPSW during setup). XNU patches are under the **Apple Public Source License 2.0**; original loader, driver, and userland code is under **MIT**. Not affiliated with or endorsed by Apple.
+The repository includes CONNSYS radio firmware under `firmware/connsys`; these vendor files are separate from the project's own code. Apple binaries are not included (`./ios165/fetch.sh` downloads required files from Apple’s official IPSW during setup). XNU patches are under the **Apple Public Source License 2.0**; original loader, driver, and userland code is under **MIT**. Not affiliated with or endorsed by Apple.
 
 ---
 
