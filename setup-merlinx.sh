@@ -29,17 +29,23 @@ SDK_PATH="$THEOS_DIR/sdks/iPhoneOS16.5.sdk"
 if [ -z "${LDID:-}" ] && ! command -v ldid >/dev/null 2>&1 && [ -x "$THEOS_DIR/toolchain/linux/iphone/bin/ldid" ]; then
 	export LDID="$THEOS_DIR/toolchain/linux/iphone/bin/ldid"
 fi
-JOBS="$(nproc 2>/dev/null || echo 8)"
+CPU_CORES="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)"
+JOBS="${JOBS:-$CPU_CORES}"
 ADB_SERIAL=""
 STOCK_BOOT_CONTAINER=""
 TMP_BOOT_CONTAINER=""
+VERBOSE=0
+ASSUME_YES=0
+DRY_RUN=0
+NON_INTERACTIVE_ACTION=""
 
 cleanup() {
+	[ -t 1 ] && printf '\033[?25h' || true # restore cursor
 	if [ -n "$TMP_BOOT_CONTAINER" ] && [ -f "$TMP_BOOT_CONTAINER" ]; then
 		rm -f "$TMP_BOOT_CONTAINER"
 	fi
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 clear_screen() {
 	[ -t 1 ] && printf '\033[2J\033[H' || true
@@ -66,6 +72,128 @@ pause_enter() {
 	read -r -p "Press [Enter] to continue... " _
 }
 
+# Distro package manager detection for helpful install instructions
+detect_pm() {
+	if [ -f /etc/os-release ]; then
+		# shellcheck disable=SC1091
+		. /etc/os-release
+		case "${ID:-}" in
+			ubuntu|debian|linuxmint|pop) echo "apt" ;;
+			arch|manjaro|endeavouros)     echo "pacman" ;;
+			fedora|rhel|centos|rocky|alma) echo "dnf" ;;
+			opensuse*|suse)               echo "zypper" ;;
+			alpine)                       echo "apk" ;;
+			*)
+				case "${ID_LIKE:-}" in
+					*debian*|*ubuntu*) echo "apt" ;;
+					*arch*)            echo "pacman" ;;
+					*fedora*|*rhel*)   echo "dnf" ;;
+					*suse*)            echo "zypper" ;;
+					*)                 echo "unknown" ;;
+				esac
+				;;
+		esac
+	elif [ "$(uname -s)" = "Darwin" ]; then
+		echo "brew"
+	else
+		echo "unknown"
+	fi
+}
+
+# Intelligent failure diagnosis and recovery handler
+handle_step_failure() {
+	local title="$1"
+	local logfile="$2"
+	local rc="$3"
+	shift 3
+	local cmd=("$@")
+
+	echo ""
+	fail "$title failed (exit $rc)"
+
+	# Highlight root cause if detectable in log
+	if grep -iqE "killed|out of memory|exit code 137" "$logfile" 2>/dev/null; then
+		echo "  ${C_RED}* Out of Memory (OOM):${C_RESET} Process was killed due to insufficient RAM/swap."
+		echo "    ${C_CYAN}Remedy:${C_RESET} Rerun with fewer parallel jobs (e.g. -j 2 or -j 4) or add swap space:"
+		echo "            sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
+	elif grep -iqE "no space left on device|disk full" "$logfile" 2>/dev/null; then
+		echo "  ${C_RED}* Disk Full:${C_RESET} No space left on device. Free up disk space (~15-20 GB needed)."
+	elif grep -iqE "device offline|device not found|error: closed|device unauthorized" "$logfile" 2>/dev/null; then
+		echo "  ${C_RED}* ADB Connection Lost:${C_RESET} Device disconnected. Check USB cable and recovery status."
+	elif grep -iqE "fatal error: '.*' file not found" "$logfile" 2>/dev/null; then
+		local missing_hdr
+		missing_hdr=$(grep -iE "fatal error: '.*' file not found" "$logfile" 2>/dev/null | head -n 3 | sed -e 's/^[[:space:]]*//' || true)
+		echo "  ${C_RED}* Missing Header:${C_RESET} $missing_hdr"
+	elif grep -iqE "command not found" "$logfile" 2>/dev/null; then
+		local missing_cmd
+		missing_cmd=$(grep -iE "command not found" "$logfile" 2>/dev/null | head -n 3 | sed -e 's/^[[:space:]]*//' || true)
+		echo "  ${C_RED}* Missing Command:${C_RESET} $missing_cmd"
+	fi
+
+	local err_lines
+	err_lines=$(grep -n -iE 'error:|fatal error:|cannot find|failed to' "$logfile" 2>/dev/null | grep -v "error: 0" | head -n 8 || true)
+	if [ -n "$err_lines" ]; then
+		echo ""
+		echo "  ${C_YELLOW}Key Error Indicators:${C_RESET}"
+		echo "${C_RED}$err_lines${C_RESET}"
+	fi
+
+	echo ""
+	echo "${C_YELLOW}--- Last 20 lines of $logfile ---${C_RESET}"
+	tail -n 20 "$logfile" 2>/dev/null || true
+	echo "${C_YELLOW}----------------------------------${C_RESET}"
+	echo ""
+
+	# If non-interactive mode or stdin not a terminal, return exit code immediately
+	if [ -n "$NON_INTERACTIVE_ACTION" ] || [ ! -t 0 ]; then
+		return "$rc"
+	fi
+
+	# Interactive Recovery Prompt
+	while true; do
+		echo "${C_BOLD}Recovery Options:${C_RESET}"
+		echo "  ${C_GREEN}1) Retry${C_RESET} this step"
+		echo "  ${C_CYAN}2) View full log${C_RESET} ($logfile)"
+		echo "  ${C_BLUE}3) Open interactive subshell${C_RESET} at project root (to fix manually)"
+		echo "  ${C_YELLOW}4) Skip${C_RESET} this step and continue (advanced)"
+		echo "  ${C_RED}5) Abort${C_RESET} to main menu"
+		echo ""
+		read -r -p "Choice [1-5]: " act
+		case "$act" in
+			1)
+				info "Retrying: $title..."
+				run_step "$title" "$logfile" "${cmd[@]}"
+				return $?
+				;;
+			2)
+				if command -v less >/dev/null 2>&1; then
+					less "$logfile" || true
+				elif command -v more >/dev/null 2>&1; then
+					more "$logfile" || true
+				else
+					cat "$logfile" | head -n 100 || true
+				fi
+				continue
+				;;
+			3)
+				info "Spawning subshell at $ROOT. Type 'exit' to return."
+				( cd "$ROOT" && "${SHELL:-bash}" ) || true
+				continue
+				;;
+			4)
+				warn "Skipping step '$title'. Dependent steps may fail!"
+				return 0
+				;;
+			5|q|Q)
+				return "$rc"
+				;;
+			*)
+				warn "Invalid choice."
+				;;
+		esac
+	done
+}
+
 run_step() {
 	local title="$1"
 	local logfile="$2"
@@ -76,30 +204,74 @@ run_step() {
 	local progress_file pid rc elapsed=0 progress
 	progress_file=$(mktemp "$LOG_DIR/progress.XXXXXX")
 	printf '\n== %s ==\n' "$title" >> "$SESSION_LOG"
-	HAKIOS_PROGRESS_FILE="$progress_file" "$@" > "$logfile" 2>&1 &
-	pid=$!
-	if [ -t 1 ]; then
-		while kill -0 "$pid" 2>/dev/null; do
-			progress=$(cat "$progress_file" 2>/dev/null || true)
-			printf '\r\033[K    %s  %s' "${progress:-Working...}" "(${elapsed}s)"
-			sleep 1
-			elapsed=$((elapsed + 1))
-		done
-		printf '\r\033[K'
+
+	local start_time
+	start_time=$(date +%s 2>/dev/null || echo 0)
+	local spin_chars=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+	local spin_idx=0
+
+	if [ "$VERBOSE" -eq 1 ]; then
+		# Verbose mode: stream command output directly to terminal and log
+		HAKIOS_PROGRESS_FILE="$progress_file" "$@" 2>&1 | tee -a "$logfile" "$SESSION_LOG"
+		rc=${PIPESTATUS[0]}
+	else
+		HAKIOS_PROGRESS_FILE="$progress_file" "$@" > "$logfile" 2>&1 &
+		pid=$!
+		if [ -t 1 ]; then
+			printf '\033[?25l' || true # hide cursor
+			while kill -0 "$pid" 2>/dev/null; do
+				progress=$(cat "$progress_file" 2>/dev/null || true)
+				# If no explicit progress reported, extract latest activity from log tail
+				if [ -z "$progress" ] && [ -f "$logfile" ]; then
+					progress=$(tail -n 20 "$logfile" 2>/dev/null | grep -E '(\[[0-9]+/[0-9]+\]|Compiling|Building|Linking|Fetching|Extracting|Creating|Signing|CC |CXX |AR |LD )' | tail -n 1 | tr -d '\r\n' || true)
+					progress=$(echo "$progress" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+				fi
+
+				# Truncate cleanly to terminal width
+				local term_cols
+				term_cols=$(tput cols 2>/dev/null || echo 80)
+				local max_prog_len=$((term_cols - 25))
+				[ "$max_prog_len" -lt 15 ] && max_prog_len=15
+				if [ ${#progress} -gt $max_prog_len ]; then
+					progress="${progress:0:$((max_prog_len - 3))}..."
+				fi
+
+				local now duration_str
+				now=$(date +%s 2>/dev/null || echo $((start_time + elapsed)))
+				elapsed=$((now - start_time))
+				local mins=$((elapsed / 60))
+				local secs=$((elapsed % 60))
+				printf -v duration_str '%02d:%02d' "$mins" "$secs"
+
+				local spin="${spin_chars[$spin_idx]}"
+				spin_idx=$(( (spin_idx + 1) % ${#spin_chars[@]} ))
+
+				printf '\r\033[K    %s%s%s [%s] %s' "${C_CYAN}" "$spin" "${C_RESET}" "$duration_str" "${progress:-Working...}"
+				sleep 0.5
+			done
+			printf '\033[?25h\r\033[K' || true # restore cursor
+		fi
+		if wait "$pid"; then rc=0; else rc=$?; fi
 	fi
-	if wait "$pid"; then rc=0; else rc=$?; fi
-	cat "$logfile" >> "$SESSION_LOG"
+
+	local end_time total_secs
+	end_time=$(date +%s 2>/dev/null || echo 0)
+	total_secs=$((end_time - start_time))
+	local total_mins=$((total_secs / 60))
+	local rem_secs=$((total_secs % 60))
+	local duration_formatted="${total_mins}m ${rem_secs}s"
+	[ "$total_mins" -eq 0 ] && duration_formatted="${total_secs}s"
+
+	if [ "$VERBOSE" -ne 1 ]; then
+		cat "$logfile" >> "$SESSION_LOG"
+	fi
 	rm -f "$progress_file"
 	if [ "$rc" -eq 0 ]; then
-		ok "$title"
+		ok "$title (completed in $duration_formatted)"
 		return 0
 	else
-		echo ""
-		fail "$title failed (exit $rc)"
-		echo "${C_YELLOW}--- Last 20 lines of $logfile ---${C_RESET}"
-		tail -n 20 "$logfile" || true
-		echo "${C_YELLOW}----------------------------------${C_RESET}"
-		return $rc
+		handle_step_failure "$title" "$logfile" "$rc" "$@"
+		return $?
 	fi
 }
 
@@ -114,7 +286,7 @@ adb_cmd() {
 # 1. Host & Toolchain Preflight
 check_host() {
 	local missing_pkgs=()
-	local cmds=(adb python3 git curl tar xz make cc clang flex bison m4 perl autoconf automake meson ninja llvm-ar)
+	local cmds=(adb python3 git curl tar xz make cc clang flex bison m4 perl autoconf automake meson ninja llvm-ar patch)
 	local c
 	for c in "${cmds[@]}"; do
 		if ! command -v "$c" >/dev/null 2>&1; then
@@ -130,12 +302,60 @@ check_host() {
 	fi
 
 	echo "${C_BOLD}Host Environment Check:${C_RESET}"
+
+	# Check WSL2 environment
+	if [ -f /proc/sys/fs/binfmt_misc/WSLInterop ] || uname -r | grep -qi "microsoft"; then
+		info "Running in Windows Subsystem for Linux (WSL2)."
+		info "Ensure your phone is attached from Windows PowerShell via: usbipd wsl attach --busid <BUSID>"
+	fi
+
+	# Disk space check (~18-20 GB needed for full build)
+	local free_kb free_gb
+	free_kb=$(df -Pk "$ROOT" 2>/dev/null | awk 'NR==2 {print $4}' || echo 0)
+	free_gb=$((free_kb / 1024 / 1024))
+	if [ "$free_gb" -gt 0 ]; then
+		if [ "$free_gb" -lt 12 ]; then
+			fail "Low disk space: only ${free_gb} GB free on $(df -h "$ROOT" 2>/dev/null | awk 'NR==2 {print $6}')."
+			echo "  Building HakiOS requires at least 15-20 GB free space during compilation."
+			return 1
+		elif [ "$free_gb" -lt 18 ]; then
+			warn "Available disk space: ${free_gb} GB (~18-20 GB recommended for full build)."
+		else
+			ok "Available disk space: ${free_gb} GB"
+		fi
+	fi
+
+	# RAM check & jobs advisory
+	local mem_kb=0 mem_gb=0
+	if [ -f /proc/meminfo ]; then
+		mem_kb=$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+		mem_gb=$((mem_kb / 1024 / 1024))
+		if [ "$mem_gb" -gt 0 ] && [ "$mem_gb" -lt 4 ]; then
+			warn "System RAM is ${mem_gb} GB. If compilation fails with OOM, run with -j 2 or add swap."
+		fi
+	fi
+
 	if [ ${#missing_pkgs[@]} -gt 0 ]; then
 		fail "Missing host tools: ${missing_pkgs[*]}"
 		echo ""
 		echo "Install them first:"
-		echo "  Debian/Ubuntu: sudo apt update && sudo apt install -y adb python3 python3-venv git curl tar xz-utils build-essential clang lld flex bison m4 perl autoconf automake meson ninja-build llvm 7zip"
-		echo "  Arch Linux:    sudo pacman -S --needed android-tools python git curl tar xz base-devel clang lld flex bison m4 perl autoconf automake meson ninja llvm 7zip"
+		local pm
+		pm=$(detect_pm)
+		case "$pm" in
+			fedora|rhel|centos|rocky|alma)
+				echo "  Fedora/RHEL:   sudo dnf install -y android-tools python3 python3-pip git curl tar xz gcc gcc-c++ clang lld flex bison m4 perl autoconf automake meson ninja-build llvm patch p7zip p7zip-plugins"
+				;;
+			opensuse*|suse)
+				echo "  openSUSE:      sudo zypper install -y android-tools python3 python3-pip git curl tar xz gcc gcc-c++ clang lld flex bison m4 perl autoconf automake meson ninja llvm patch p7zip"
+				;;
+			brew)
+				echo "  macOS (Homebrew): brew install android-platform-tools python git curl xz make clang-format flex bison m4 perl autoconf automake meson ninja llvm patch sevenzip"
+				;;
+			*)
+				echo "  Debian/Ubuntu: sudo apt update && sudo apt install -y adb python3 python3-venv git curl tar xz-utils build-essential clang lld flex bison m4 perl autoconf automake meson ninja-build llvm patch 7zip"
+				echo "  Arch Linux:    sudo pacman -S --needed android-tools python git curl tar xz base-devel clang lld flex bison m4 perl autoconf automake meson ninja llvm patch 7zip"
+				;;
+		esac
 		echo "  Install ldid, or set LDID to a compatible signing executable."
 		return 1
 	fi
@@ -150,11 +370,16 @@ check_host() {
 
 	if [ ! -x "$ROOT/xnu-deps/host/zig/zig" ] && ! command -v ld.lld >/dev/null 2>&1; then
 		warn "Neither ld.lld nor xnu-deps/host/zig/zig found (needed for mtkloader)."
-		read -r -p "Run ./tools/get-zig.sh now to fetch zig? [Y/n] " ans
-		if [[ "${ans:-Y}" =~ ^[Yy]$ ]]; then
-			run_step "Fetching zig (ld.lld)" "$LOG_DIR/get-zig.log" bash "$ROOT/tools/get-zig.sh"
+		if [ -z "$NON_INTERACTIVE_ACTION" ]; then
+			read -r -p "Run ./tools/get-zig.sh now to fetch zig? [Y/n] " ans
+			if [[ "${ans:-Y}" =~ ^[Yy]$ ]]; then
+				run_step "Fetching zig (ld.lld)" "$LOG_DIR/get-zig.log" bash "$ROOT/tools/get-zig.sh"
+			else
+				fail "Cannot build mtkloader without ld.lld or zig."
+				return 1
+			fi
 		else
-			fail "Cannot build mtkloader without ld.lld or zig."
+			fail "Cannot build mtkloader without ld.lld or zig. Run ./tools/get-zig.sh first."
 			return 1
 		fi
 	else
@@ -184,8 +409,15 @@ connect_recovery() {
 			warn "No ADB device detected."
 			echo "  1. Boot your Redmi Note 9 (merlinx) into your custom recovery (hold Vol+ + Power)."
 			echo "  2. Connect the USB cable (make sure ADB is enabled in recovery)."
-			read -r -p "Press [Enter] to retry, or type 'q' to cancel: " ans
-			[ "$ans" = "q" ] && return 1
+			echo "  3. In WSL2, attach phone via: usbipd wsl attach --busid <BUSID>"
+			read -r -p "Press [Enter] to retry, [r] to run 'adb reboot recovery', or type 'q' to cancel: " ans
+			if [ "$ans" = "q" ] || [ "$ans" = "Q" ]; then
+				return 1
+			elif [ "$ans" = "r" ] || [ "$ans" = "R" ]; then
+				info "Sending 'adb reboot recovery' command..."
+				adb reboot recovery 2>/dev/null || true
+				sleep 5
+			fi
 			continue
 		fi
 
@@ -240,6 +472,19 @@ connect_recovery() {
 			warn "Connected device reports '$dev' (expected merlin/merlinx)."
 			read -r -p "Continue anyway? [y/N] " ans
 			[[ "$ans" =~ ^[Yy]$ ]] || return 1
+		fi
+
+		# Check battery level if exposed by recovery kernel
+		local batt
+		batt=$(adb_cmd shell "cat /sys/class/power_supply/battery/capacity 2>/dev/null || cat /sys/class/power_supply/bms/capacity 2>/dev/null" | tr -d '\r\n ' || true)
+		if [[ "$batt" =~ ^[0-9]+$ ]]; then
+			if [ "$batt" -lt 25 ]; then
+				warn "Device battery is LOW (${batt}%). Please charge to >= 30% before flashing!"
+				read -r -p "Continue anyway? [y/N] " ans
+				[[ "$ans" =~ ^[Yy]$ ]] || return 1
+			else
+				ok "Device battery: ${batt}%"
+			fi
 		fi
 
 		local missing_rec=()
@@ -300,6 +545,7 @@ if b'XNUP' in d:
 			warn "The phone's boot partition is not a valid Android v2 boot.img."
 		fi
 		read -r -p "Enter path to a stock merlinx Android boot.img: " custom_boot
+		custom_boot="${custom_boot/#\~/$HOME}"
 		if [ -f "$custom_boot" ]; then
 			STOCK_BOOT_CONTAINER="$custom_boot"
 			return 0
@@ -421,6 +667,35 @@ build_all() {
 	step_pack_boot || return 1
 }
 
+# Pre-flash validation helper
+verify_flash_artifacts() {
+	local need_sys="${1:-0}"
+	if [ ! -s "$ROOT/boot-ios.img" ]; then
+		fail "Missing boot image: $ROOT/boot-ios.img"
+		return 1
+	fi
+	local boot_size
+	boot_size=$(wc -c < "$ROOT/boot-ios.img")
+	if [ "$boot_size" -gt $((64 * 1024 * 1024)) ]; then
+		fail "boot-ios.img exceeds 64 MiB partition limit (${boot_size} bytes)."
+		return 1
+	fi
+	if [ "$need_sys" -eq 1 ]; then
+		if [ ! -s "$ROOT/userland/system.apfs" ]; then
+			fail "Missing system image: $ROOT/userland/system.apfs"
+			return 1
+		fi
+		local sys_size
+		sys_size=$(wc -c < "$ROOT/userland/system.apfs")
+		if [ "$sys_size" -gt $((8390592 * 512)) ]; then
+			fail "system.apfs exceeds 4.0 GiB partition capacity (${sys_size} bytes)."
+			return 1
+		fi
+	fi
+	ok "Build artifacts verified and within partition limits"
+	return 0
+}
+
 action_full_install() {
 	clear_screen
 	banner
@@ -433,31 +708,44 @@ action_full_install() {
   !====================================================================!
 EOF
 	echo "${C_RESET}"
-	read -r -p "Type YES to confirm you understand all data will be lost: " confirm
-	if [ "$confirm" != "YES" ]; then
-		warn "Cancelled."
-		return 0
+	if [ "$ASSUME_YES" -eq 0 ]; then
+		read -r -p "Type YES to confirm you understand all data will be lost: " confirm
+		if [ "$confirm" != "YES" ]; then
+			warn "Cancelled."
+			return 0
+		fi
 	fi
 
 	connect_recovery || return 1
 	build_all || return 1
+	verify_flash_artifacts 1 || return 1
 
 	echo ""
 	info "Flashing & repartitioning device $ADB_SERIAL..."
-	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" \
-		--serial "$ADB_SERIAL" \
-		--repartition \
-		--yes \
-		--format-iosdata \
-		--xnusys "$ROOT/userland/system.apfs" \
-		--boot "$ROOT/boot-ios.img" \
-		--reboot || { cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"; fail "Flashing/repartitioning failed! Details: $LOG_DIR/flash.log"; return 1; }
+	local flash_args=(
+		--serial "$ADB_SERIAL"
+		--repartition
+		--yes
+		--format-iosdata
+		--xnusys "$ROOT/userland/system.apfs"
+		--boot "$ROOT/boot-ios.img"
+		--reboot
+	)
+	[ "$DRY_RUN" -eq 1 ] && flash_args+=(--dry-run)
+
+	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" "${flash_args[@]}" || {
+		cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"
+		fail "Flashing/repartitioning failed! Details: $LOG_DIR/flash.log"
+		return 1
+	}
 	cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"
 	echo ""
 	ok "Installation complete! First boot takes ~2 minutes."
 	echo "  Tip: For future reboots, use 'idevicediagnostics restart' over USB so ext2 stays clean."
 	echo ""
-	prompt_cleanup_artifacts
+	if [ "$ASSUME_YES" -eq 0 ]; then
+		prompt_cleanup_artifacts
+	fi
 }
 
 prompt_cleanup_artifacts() {
@@ -498,7 +786,17 @@ action_update_boot() {
 	step_build_xnu || return 1
 	step_build_userland || return 1
 	step_pack_boot || return 1
-	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" --serial "$ADB_SERIAL" --boot "$ROOT/boot-ios.img" --reboot || { cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"; fail "Flashing failed! Details: $LOG_DIR/flash.log"; return 1; }
+	verify_flash_artifacts 0 || return 1
+
+	local flash_args=(
+		--serial "$ADB_SERIAL"
+		--boot "$ROOT/boot-ios.img"
+		--reboot
+	)
+	[ "$DRY_RUN" -eq 1 ] && flash_args+=(--dry-run)
+
+	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" "${flash_args[@]}" || {
+		cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"; fail "Flashing failed! Details: $LOG_DIR/flash.log"; return 1; }
 	cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"
 	ok "Updated boot-ios.img and rebooted!"
 }
@@ -509,8 +807,17 @@ action_update_system() {
 	info "Update System and Boot (replaces xnusys and boot; keeps iosdata)"
 	connect_recovery || return 1
 	build_all || return 1
-	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" --serial "$ADB_SERIAL" \
-		--xnusys "$ROOT/userland/system.apfs" --boot "$ROOT/boot-ios.img" --reboot || {
+	verify_flash_artifacts 1 || return 1
+
+	local flash_args=(
+		--serial "$ADB_SERIAL"
+		--xnusys "$ROOT/userland/system.apfs"
+		--boot "$ROOT/boot-ios.img"
+		--reboot
+	)
+	[ "$DRY_RUN" -eq 1 ] && flash_args+=(--dry-run)
+
+	HAKIOS_FLASH_LOG="$LOG_DIR/flash.log" bash "$ROOT/tools/install-merlinx.sh" "${flash_args[@]}" || {
 		cat "$LOG_DIR/flash.log" >> "$SESSION_LOG"
 		fail "System/boot update failed. Details: $LOG_DIR/flash.log"
 		return 1
@@ -528,6 +835,50 @@ action_repair_iosdata() {
 	ok "e2fsck finished."
 }
 
+log_viewer_menu() {
+	while true; do
+		clear_screen
+		banner
+		echo "${C_BOLD}Log & Diagnostics Viewer:${C_RESET}"
+		echo "  Log Directory: $LOG_DIR"
+		echo ""
+		echo "    1) View Active Session Log ($(basename "$SESSION_LOG"))"
+		echo "    2) View iOS Fetch Log (fetch-ios165.log)"
+		echo "    3) View XNU Kernel Build Log (xnu-build.log)"
+		echo "    4) View Mesa Panfrost Log (mk-mesa.log)"
+		echo "    5) View Userland Build Log (userland-build.log)"
+		echo "    6) View Flashing Log (flash.log)"
+		echo "    b) Back to main menu"
+		echo ""
+		read -r -p "Choice [1-6/b]: " lchoice
+		local target=""
+		case "$lchoice" in
+			1) target="$SESSION_LOG" ;;
+			2) target="$LOG_DIR/fetch-ios165.log" ;;
+			3) target="$LOG_DIR/xnu-build.log" ;;
+			4) target="$LOG_DIR/mk-mesa.log" ;;
+			5) target="$LOG_DIR/userland-build.log" ;;
+			6) target="$LOG_DIR/flash.log" ;;
+			b|B|q|Q) return 0 ;;
+			*) warn "Invalid choice"; sleep 1; continue ;;
+		esac
+
+		if [ -n "$target" ] && [ -f "$target" ]; then
+			if command -v less >/dev/null 2>&1; then
+				less "$target" || true
+			elif command -v more >/dev/null 2>&1; then
+				more "$target" || true
+			else
+				cat "$target" | tail -n 50 || true
+				pause_enter
+			fi
+		else
+			warn "Log file does not exist yet: $target"
+			pause_enter
+		fi
+	done
+}
+
 main_menu() {
 	while true; do
 		clear_screen
@@ -541,9 +892,10 @@ main_menu() {
 		echo "    5) Run Host & Recovery Diagnostics"
 		echo "    6) Clean Up Build/Fetch Artifacts (free ~8 GB disk space)"
 		echo "    7) Update System and Boot (keeps iosdata; rebuilds and flashes xnusys)"
+		echo "    8) View Logs"
 		echo "    q) Quit"
 		echo ""
-		read -r -p "Choice [1-7/q]: " choice
+		read -r -p "Choice [1-8/q]: " choice
 		case "$choice" in
 			1) action_full_install || true; pause_enter ;;
 			2) action_update_boot || true; pause_enter ;;
@@ -552,10 +904,134 @@ main_menu() {
 			5) check_host || true; echo ""; connect_recovery || true; pause_enter ;;
 			6) action_cleanup_artifacts || true; pause_enter ;;
 			7) action_update_system || true; pause_enter ;;
+			8) log_viewer_menu ;;
 			q|Q) exit 0 ;;
 			*) warn "Invalid choice"; sleep 1 ;;
 		esac
 	done
 }
 
-main_menu
+show_help() {
+	cat <<EOF
+HakiOS setup-merlinx.sh - Interactive & Scriptable Installer
+
+Usage: ./setup-merlinx.sh [options]
+
+Options:
+  -h, --help            Show this help message
+  -c, --check           Run host and recovery environment checks
+  -b, --build           Build all components (kernel, Mesa, userland, boot-ios.img)
+  -i, --install         Full install (repartition + flash; WIPES DATA)
+  --update-boot         Rebuild and flash boot-ios.img only
+  --update-system       Rebuild and flash xnusys and boot-ios.img (preserves iosdata)
+  --repair-data         Run e2fsck on device /dev/block/by-name/iosdata
+  --clean               Clean temporary build and iOS extraction artifacts
+  -j, --jobs <N>        Set build concurrency (default: $CPU_CORES)
+  -s, --serial <SERIAL> Target specific ADB device serial
+  -v, --verbose         Stream full command output in real time
+  -y, --yes             Skip confirmation prompts
+  --dry-run             Simulate flashing without modifying device
+
+Without options, launches the interactive ASCII TUI menu.
+EOF
+}
+
+parse_args() {
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			-h|--help)
+				show_help
+				exit 0
+				;;
+			-c|--check)
+				NON_INTERACTIVE_ACTION="check"
+				shift
+				;;
+			-b|--build|--build-only)
+				NON_INTERACTIVE_ACTION="build"
+				shift
+				;;
+			-i|--install|--full-install)
+				NON_INTERACTIVE_ACTION="install"
+				shift
+				;;
+			--update-boot)
+				NON_INTERACTIVE_ACTION="update_boot"
+				shift
+				;;
+			--update-system)
+				NON_INTERACTIVE_ACTION="update_system"
+				shift
+				;;
+			--repair-data)
+				NON_INTERACTIVE_ACTION="repair_data"
+				shift
+				;;
+			--clean)
+				NON_INTERACTIVE_ACTION="clean"
+				shift
+				;;
+			-j|--jobs)
+				JOBS="$2"
+				shift 2
+				;;
+			-s|--serial)
+				ADB_SERIAL="$2"
+				shift 2
+				;;
+			-v|--verbose)
+				VERBOSE=1
+				shift
+				;;
+			-y|--yes)
+				ASSUME_YES=1
+				shift
+				;;
+			--dry-run)
+				DRY_RUN=1
+				shift
+				;;
+			*)
+				echo "Error: Unknown argument: $1" >&2
+				show_help
+				exit 1
+				;;
+		esac
+	done
+}
+
+main() {
+	parse_args "$@"
+
+	if [ -n "$NON_INTERACTIVE_ACTION" ]; then
+		case "$NON_INTERACTIVE_ACTION" in
+			check)
+				check_host
+				connect_recovery
+				;;
+			build)
+				build_all
+				;;
+			install)
+				action_full_install
+				;;
+			update_boot)
+				action_update_boot
+				;;
+			update_system)
+				action_update_system
+				;;
+			repair_data)
+				action_repair_iosdata
+				;;
+			clean)
+				action_cleanup_artifacts
+				;;
+		esac
+		exit $?
+	fi
+
+	main_menu
+}
+
+main "$@"
